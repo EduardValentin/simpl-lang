@@ -1,0 +1,6 @@
+var v1 int
+var v2 int = 2
+var v3 string = "Hello"
+var v4 float = 2.14
+var v5 array[string] = ["a", "b", "c"]
+var v6 array[array[int]] = [[1,2,3], [3,4,5]]
