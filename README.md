@@ -60,7 +60,7 @@ if v3 == v4 {
 ```
 // Should print the values 0, 2, 4
 
-from i from 0 to 5 step 2 {
+for i from 0 to 5 step 2 {
     write i, " "
 }
 ```
