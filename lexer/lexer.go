@@ -309,18 +309,29 @@ func (l *Lexer) arrayLiteral() []any {
 
 	var literalEnded bool = false
 
-	for literalEnded == false {
-		item, delimiterFound, err := l.matchUntillFromStartPos(",]", l.current)
-		item = strings.Trim(item, " ,]")
+	for l.current < len(l.source) {
 
-		if err != nil {
-			panic("Error: Array literal not properly formatted at line: " + fmt.Sprint(l.line))
-		}
-
-		items = append(items, item)
-
-		if delimiterFound == ']' {
+		if l.currentChar() == ']' {
 			literalEnded = true
+			break
+		} else if l.currentChar() == '[' {
+			l.advance()
+			item := l.arrayLiteral()
+			items = append(items, item)
+		} else {
+			item, delimiter, err := l.matchUntillFromStartPos(",]", l.current)
+			item = strings.Trim(item, " ,]")
+
+			if err != nil {
+				panic("Error: Array literal not properly formatted at line: " + fmt.Sprint(l.line))
+			}
+
+			items = append(items, item)
+
+			if delimiter == ']' {
+				literalEnded = true
+				break
+			}
 		}
 	}
 
