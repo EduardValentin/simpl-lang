@@ -159,7 +159,7 @@ func (l *Lexer) Scan() {
 			l.line++
 		case '\r', '\t', ' ':
 		case '[':
-			items := l.arrayLiteral()
+			items := l.arrayLiteral(0)
 			l.lexemes = append(l.lexemes, Lexeme{token: ARRAY, value: items, line: l.line})
 		case '{':
 			l.lexemes = append(l.lexemes, Lexeme{token: SQUIRLY_OPEN, line: l.line})
@@ -297,6 +297,7 @@ func (l *Lexer) array() {
 	if substr == "int" || substr == "float" || substr == "string" || substr == "bool" {
 		l.lexemes = append(l.lexemes, Lexeme{token: KEYWORDS[substr], value: TOKENS_STR[KEYWORDS[substr]], line: l.line})
 	} else if substr == "array" {
+		l.lexemes = append(l.lexemes, Lexeme{token: ARRAY_TYPE, value: TOKENS_STR[ARRAY_TYPE], line: l.line})
 		l.array()
 	}
 
@@ -304,21 +305,23 @@ func (l *Lexer) array() {
 	l.advance()
 }
 
-func (l *Lexer) arrayLiteral() []any {
+func (l *Lexer) arrayLiteral(depth uint8) []any {
 	items := make([]any, 0, 5)
 
 	var literalEnded bool = false
 
-	for l.current < len(l.source) {
-
-		if l.currentChar() == ']' {
-			literalEnded = true
-			break
-		} else if l.currentChar() == '[' {
+	for l.current < len(l.source) && !literalEnded {
+		switch l.currentChar() {
+		case ']':
 			l.advance()
-			item := l.arrayLiteral()
+			literalEnded = true
+		case '[':
+			l.advance()
+			item := l.arrayLiteral(depth + 1)
 			items = append(items, item)
-		} else {
+		case ' ':
+			l.advance()
+		default:
 			item, delimiter, err := l.matchUntillFromStartPos(",]", l.current)
 			item = strings.Trim(item, " ,]")
 
@@ -330,8 +333,8 @@ func (l *Lexer) arrayLiteral() []any {
 
 			if delimiter == ']' {
 				literalEnded = true
-				break
 			}
+
 		}
 	}
 
@@ -339,29 +342,35 @@ func (l *Lexer) arrayLiteral() []any {
 		panic("Error: Array literal not properly ended")
 	}
 
-	var arrayType Token
-	lastLexemeIdx := len(l.lexemes) - 1
-
-	if l.lexemes[lastLexemeIdx].token == ASIGNMENT && l.lexemes[lastLexemeIdx-1].token == BRACKET_CLOSE {
-		arrayType = l.lexemes[lastLexemeIdx-2].token
-	} else if l.lexemes[lastLexemeIdx].token == ASIGNMENT && l.lexemes[lastLexemeIdx-1].token == IDENTIFIER {
-		identifier := l.lexemes[lastLexemeIdx-1].value
-
-		_, idx, err := l.findTypeForIdentifier(identifier.(string))
-		if err != nil {
-			panic(err)
-		}
-		arrayType = l.lexemes[idx+2].token
-	}
-
-	for i, item := range items {
-		parsed, err := literalParsersByType[arrayType](item.(string))
-		if err == nil {
-			items[i] = parsed
-		} else {
-			panic(err)
-		}
-	}
+	//
+	// var arrayType Token
+	// for i,v := range l.lexemes {
+	// 	if v.token === ARRAY_TYPE {
+	//
+	// 	}
+	// }
+	//
+	// lastLexemeIdx := len(l.lexemes) - 1
+	//
+	// if l.lexemes[lastLexemeIdx].token == ASIGNMENT && l.lexemes[lastLexemeIdx-1].token == BRACKET_CLOSE {
+	// 	arrayType = l.lexemes[lastLexemeIdx-2].token
+	// } else if l.lexemes[lastLexemeIdx].token == ASIGNMENT && l.lexemes[lastLexemeIdx-1].token == IDENTIFIER {
+	// 	identifier := l.lexemes[lastLexemeIdx-1].value
+	//
+	// 	_, idx, err := l.findTypeForIdentifier(identifier.(string))
+	// 	if err != nil {
+	// 		panic(err)
+	// 	}
+	// 	arrayType = l.lexemes[idx+2].token
+	// }
+	//
+	// for i, item := range items {
+	// 	parsed, err := literalParsersByType[arrayType](item.(string))
+	// 	if err == nil {
+	// 		items[i] = parsed
+	// 	} else {
+	// 		panic(err)
+	// 	}
 
 	return items
 }
