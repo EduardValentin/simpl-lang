@@ -1,3 +1,3 @@
-module github.com/EduardValentin/simpl
+module github.com/EduardValentin/simpl-lang
 
 go 1.22.5

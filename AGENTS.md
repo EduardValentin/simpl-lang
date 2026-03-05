@@ -3,6 +3,8 @@
 ## Repository Purpose
 `simpl-lang` implements **Simpl**, an interpreted teaching language designed for beginner algorithm/data-structure exercises.
 
+Canonical Go module path: `github.com/EduardValentin/simpl-lang`.
+
 Primary goals:
 - Keep syntax readable and minimal.
 - Keep runtime behavior deterministic and safe for online code-submission platforms.
@@ -49,6 +51,13 @@ Defined in `main.go`:
 
 These defaults are overrideable via `RunOptions` or CLI flags.
 
+## Runtime Streaming Hooks
+`RunOptions` also supports optional callbacks used by host platforms:
+- `OnStdoutChunk(chunk string, stepsUsed int64)`
+- `OnDiagnostic(d Diagnostic)`
+
+Use these for live console/event streaming integrations (for example SSE/WebSocket in `course-platform`).
+
 ## Tests
 Main tests live at repository root:
 - `lexer_v1_test.go`
@@ -61,6 +70,8 @@ Run all tests:
 ```bash
 go test ./...
 ```
+
+CI should run `go test ./...` on every push/PR.
 
 ## Agent Workflow Expectations
 When changing syntax/semantics:

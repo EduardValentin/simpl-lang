@@ -22,6 +22,8 @@ type interpreter struct {
 	deadline   time.Time
 	timedOut   bool
 	halted     bool
+	onStdout   func(chunk string, stepsUsed int64)
+	onDiag     func(d Diagnostic)
 }
 
 func newInterpreter(stdin string, opts RunOptions) *interpreter {
@@ -31,6 +33,8 @@ func newInterpreter(stdin string, opts RunOptions) *interpreter {
 		input:    strings.Fields(stdin),
 		maxSteps: opts.MaxSteps,
 		deadline: time.Now().Add(opts.Timeout),
+		onStdout: opts.OnStdoutChunk,
+		onDiag:   opts.OnDiagnostic,
 	}
 }
 
@@ -85,7 +89,11 @@ func (i *interpreter) execStmt(stmt Stmt) {
 			if !ok {
 				return
 			}
-			i.stdout.WriteString(valueToString(v))
+			chunk := valueToString(v)
+			i.stdout.WriteString(chunk)
+			if i.onStdout != nil {
+				i.onStdout(chunk, i.steps)
+			}
 		}
 	case *IfStmt:
 		if i.evalCondition(s.Primary.Condition) {
@@ -542,13 +550,21 @@ func (i *interpreter) tick(pos Position) bool {
 	if !i.deadline.IsZero() && time.Now().After(i.deadline) {
 		i.timedOut = true
 		i.halted = true
-		i.diags = append(i.diags, newDiagnostic("LIMIT_TIMEOUT", "limit", "Execution timed out.", pos, "Optimize the loop or increase timeout for this exercise."))
+		d := newDiagnostic("LIMIT_TIMEOUT", "limit", "Execution timed out.", pos, "Optimize the loop or increase timeout for this exercise.")
+		i.diags = append(i.diags, d)
+		if i.onDiag != nil {
+			i.onDiag(d)
+		}
 		return false
 	}
 	i.steps++
 	if i.maxSteps > 0 && i.steps > i.maxSteps {
 		i.halted = true
-		i.diags = append(i.diags, newDiagnostic("LIMIT_STEPS_EXCEEDED", "limit", "Execution step limit exceeded.", pos, "Check for infinite loops or reduce algorithm steps."))
+		d := newDiagnostic("LIMIT_STEPS_EXCEEDED", "limit", "Execution step limit exceeded.", pos, "Check for infinite loops or reduce algorithm steps.")
+		i.diags = append(i.diags, d)
+		if i.onDiag != nil {
+			i.onDiag(d)
+		}
 		return false
 	}
 	return true
@@ -556,5 +572,9 @@ func (i *interpreter) tick(pos Position) bool {
 
 func (i *interpreter) addRuntimeDiag(code, message string, pos Position, hint string) {
 	i.halted = true
-	i.diags = append(i.diags, newDiagnostic(code, "runtime", message, pos, hint))
+	d := newDiagnostic(code, "runtime", message, pos, hint)
+	i.diags = append(i.diags, d)
+	if i.onDiag != nil {
+		i.onDiag(d)
+	}
 }

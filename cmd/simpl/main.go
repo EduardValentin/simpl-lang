@@ -7,7 +7,7 @@ import (
 	"os"
 	"time"
 
-	"github.com/EduardValentin/simpl"
+	simpl "github.com/EduardValentin/simpl-lang"
 )
 
 func main() {

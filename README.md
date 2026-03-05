@@ -1,10 +1,16 @@
 # Simpl Lang
 
-Simpl is an interpreted teaching language designed for algorithm and data-structure exercises.
+Simpl is an interpreted teaching language designed for beginner algorithm and data-structure exercises.
 
-This repository provides:
-- A Go library API (`Validate`, `Run`, `RunFile`) for platform integration.
-- A CLI (`simpl`) for local validation and execution.
+Repository: `github.com/EduardValentin/simpl-lang`  
+Go module path: `github.com/EduardValentin/simpl-lang`
+
+## What this package provides
+- Embeddable Go runtime API for validating and executing Simpl source code.
+- Structured diagnostics for lexer/parser/type/runtime/limit errors.
+- Runtime safety limits (time + steps).
+- Optional runtime callbacks for live output/diagnostic streaming.
+- CLI for local checks and execution.
 
 ## Language Scope (V1)
 
@@ -31,13 +37,8 @@ const c2 string = "Hi!"
 ```
 
 ### Input / Output
-- `read name`: consumes the next whitespace-delimited stdin token and parses it to the variable type.
-- `write expr1, expr2, ...`: prints values exactly as concatenated text, with no automatic newline.
-
-```simpl
-read v1
-write "Value: ", v1
-```
+- `read name`: consumes next whitespace-delimited stdin token and parses by variable type.
+- `write expr1, expr2, ...`: prints values exactly as concatenated text (no automatic newline).
 
 ### Control Flow
 ```simpl
@@ -60,9 +61,10 @@ for i from 0 until 5 step 2 {
 }
 ```
 
-`for i from A until B step S` uses exclusive bounds:
-- `S > 0`: loop runs while `i < B`
-- `S < 0`: loop runs while `i > B`
+`for i from A until B step S` semantics:
+- `S > 0`: iterate while `i < B`
+- `S < 0`: iterate while `i > B`
+- `S == 0`: error
 
 ### Arrays
 ```simpl
@@ -80,12 +82,12 @@ write matrix[1][0]
 
 ### Type Rules
 - Strict static typing.
-- No implicit coercions (e.g. `int + float` is invalid).
+- No implicit coercions (for example `int + float` is invalid).
 
-## Runtime Limits
-Default limits (overridable via API/CLI):
+## Runtime limits
+Defaults (overridable via `RunOptions`):
 - Timeout: `2s`
-- Max steps: `1,000,000`
+- Max steps: `1_000_000`
 
 ## Go API
 
@@ -94,19 +96,49 @@ package example
 
 import (
     "fmt"
-    "github.com/EduardValentin/simpl"
+    simpl "github.com/EduardValentin/simpl-lang"
 )
 
 func main() {
-    source := `var x int\nread x\nwrite x`
-    result := simpl.Run(source, "42", simpl.RunOptions{})
+    source := `var x int
+read x
+write x`
 
+    result := simpl.Run(source, "42", simpl.RunOptions{})
     if len(result.Diagnostics) > 0 {
         fmt.Println(result.Diagnostics[0].Message)
         return
     }
 
     fmt.Println(result.Stdout) // 42
+}
+```
+
+### Streaming callbacks (for live console integration)
+
+```go
+package example
+
+import (
+    "fmt"
+    simpl "github.com/EduardValentin/simpl-lang"
+)
+
+func main() {
+    source := `for i from 0 until 5 step 1 { write i, " " }`
+
+    result := simpl.Run(source, "", simpl.RunOptions{
+        OnStdoutChunk: func(chunk string, stepsUsed int64) {
+            // Send chunk to SSE/WebSocket client
+            fmt.Printf("chunk=%q steps=%d\n", chunk, stepsUsed)
+        },
+        OnDiagnostic: func(d simpl.Diagnostic) {
+            // Forward runtime/limit diagnostic event
+            fmt.Printf("diag=%s %s\n", d.Code, d.Message)
+        },
+    })
+
+    _ = result
 }
 ```
 
@@ -124,8 +156,8 @@ go run ./cmd/simpl check path/to/file.simpl --json
 go run ./cmd/simpl run path/to/file.simpl --json
 ```
 
-## Error Model
-Diagnostics are structured with:
+## Diagnostics model
+Diagnostics include:
 - `code`
 - `category` (`lexer`, `parser`, `type`, `runtime`, `limit`)
 - `message`
@@ -140,6 +172,39 @@ Examples:
 - `LIMIT_STEPS_EXCEEDED`
 - `LIMIT_TIMEOUT`
 
-For full details, see:
+See:
 - `docs/simpl-v1-spec.md`
 - `docs/errors.md`
+
+## Use from `course-platform`
+
+### Production dependency
+In `course-platform`:
+```bash
+go get github.com/EduardValentin/simpl-lang@v0.2.0
+```
+
+### Local development override (optional)
+In `course-platform/go.mod`:
+```go
+replace github.com/EduardValentin/simpl-lang => /Users/trocaneduard/Documents/Personal/simpl-lang
+```
+
+## Publishing checklist
+1. Ensure tests pass:
+```bash
+go test ./...
+```
+2. Commit and push `main`.
+3. Create and push a semver tag:
+```bash
+git tag v0.2.0
+git push origin v0.2.0
+```
+4. Update consuming app (`course-platform`) with `go get ...@v0.2.0`.
+
+## Development
+Run all tests:
+```bash
+go test ./...
+```

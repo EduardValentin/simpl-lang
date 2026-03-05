@@ -15,6 +15,11 @@ const (
 type RunOptions struct {
 	MaxSteps int64
 	Timeout  time.Duration
+
+	// OnStdoutChunk is called whenever write emits text during execution.
+	OnStdoutChunk func(chunk string, stepsUsed int64)
+	// OnDiagnostic is called whenever runtime/limit diagnostics are emitted.
+	OnDiagnostic func(d Diagnostic)
 }
 
 // RunResult is the execution output and any diagnostics.
