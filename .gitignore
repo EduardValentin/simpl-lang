@@ -1,0 +1,8 @@
+# Build artifacts
+main
+bin/
+*.exe
+*.out
+
+# Go test cache artifacts
+coverage.out

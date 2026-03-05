@@ -1,0 +1,27 @@
+var a int = 5
+const b int = 3
+var msg string = "ok"
+var x float = 2.5
+var arr array[int] = [1, 2, 3]
+var matrix array[array[int]] = [[1, 2], [3, 4]]
+
+arr[1] = arr[1] + b
+matrix[1][0] = arr[1]
+
+if arr[1] == 5 {
+  write "if-pass|"
+} else {
+  write "if-fail|"
+}
+
+for i from 0 until 5 step 2 {
+  write i, ","
+}
+
+var i int = 0
+while i <= 2 {
+  write i
+  i = i + 1
+}
+
+write "|", msg, "|", x, "|", matrix[1][0]
