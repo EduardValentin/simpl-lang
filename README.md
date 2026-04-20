@@ -82,18 +82,23 @@ write matrix[1][0]
 var name string = "abc"
 write size name
 write name[0]
+push name, "d", "e"
 name[1] = "x"
 pop name
 
 var values array[int] = [1, 2, 3]
+push values, 4, 5
 write size values
 pop values
 ```
 
 - `size expr` works on arrays and strings and returns `int`.
+- `push target, value1, value2, ...` appends elements to a mutable array or string target.
 - `pop target` removes the last element from a mutable array or string target.
 - Strings are indexed by Unicode rune and `name[i]` has type `string`.
 - String indexed assignment requires exactly one character on the right-hand side.
+- `push` on strings is character-based: each pushed value must be exactly one character.
+- `string + string` still works for chunk concatenation, e.g. `name = name + "abc"`.
 
 ### Comments
 - Line comments only: `// ...`
@@ -199,7 +204,7 @@ See:
 ### Production dependency
 In `course-platform`:
 ```bash
-go get github.com/EduardValentin/simpl-lang@v0.3.0
+go get github.com/EduardValentin/simpl-lang@v0.4.0
 ```
 
 ### Local development override (optional)
@@ -216,10 +221,10 @@ go test ./...
 2. Commit and push `main`.
 3. Create and push a semver tag:
 ```bash
-git tag v0.3.0
-git push origin v0.3.0
+git tag v0.4.0
+git push origin v0.4.0
 ```
-4. Update consuming app (`course-platform`) with `go get ...@v0.3.0`.
+4. Update consuming app (`course-platform`) with `go get ...@v0.4.0`.
 
 ## Development
 Run all tests:

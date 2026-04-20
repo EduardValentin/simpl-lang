@@ -52,13 +52,14 @@ func TestLexerUnknownCharacter(t *testing.T) {
 }
 
 func TestLexerRecognizesSequenceKeywords(t *testing.T) {
-	tokens, diags := lexSource("write size name\npop name")
+	tokens, diags := lexSource("write size name\npush name, \"a\"\npop name")
 	if len(diags) != 0 {
 		t.Fatalf("unexpected diagnostics: %+v", diags)
 	}
 
 	want := []TokenType{
 		TokenWrite, TokenSize, TokenIdentifier,
+		TokenPush, TokenIdentifier, TokenComma, TokenString,
 		TokenPop, TokenIdentifier,
 		TokenEOF,
 	}

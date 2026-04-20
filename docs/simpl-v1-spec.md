@@ -10,6 +10,7 @@
 - Constant declaration: `const name Type = Expr`
 - Assignment: `name = Expr`
 - Indexed assignment: `name[idx] = Expr` (supports nested indexes)
+- Sequence push: `push name, Expr (, Expr)*`
 - Sequence pop: `pop name` or `pop name[idx]`
 - Input: `read name`
 - Output: `write Expr (, Expr)*`
@@ -50,9 +51,11 @@
 - Strings remain type `string`.
 - Strings are zero-indexed by Unicode rune.
 - `str[idx]` returns a `string` containing exactly one rune.
+- `push str, expr1, expr2, ...` appends one rune per pushed string expression.
 - Indexed string assignment requires the assigned value to contain exactly one rune.
 - `size str` returns the rune count.
 - `pop str` removes the last rune.
+- `str = str + "chunk"` is also valid and appends a whole string chunk.
 
 ## Input/Output Rules
 - `read` consumes next whitespace token and parses to target variable type.

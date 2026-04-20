@@ -20,6 +20,7 @@ const (
 	TokenConst
 	TokenRead
 	TokenWrite
+	TokenPush
 	TokenPop
 	TokenIf
 	TokenElse
@@ -82,6 +83,8 @@ func (t TokenType) String() string {
 		return "read"
 	case TokenWrite:
 		return "write"
+	case TokenPush:
+		return "push"
 	case TokenPop:
 		return "pop"
 	case TokenIf:
@@ -167,6 +170,7 @@ var keywordTokens = map[string]TokenType{
 	"const":  TokenConst,
 	"read":   TokenRead,
 	"write":  TokenWrite,
+	"push":   TokenPush,
 	"pop":    TokenPop,
 	"if":     TokenIf,
 	"else":   TokenElse,

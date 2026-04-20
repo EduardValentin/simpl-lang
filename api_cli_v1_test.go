@@ -29,10 +29,11 @@ func TestCLICheckAndRun(t *testing.T) {
 	stdinPath := filepath.Join(tmp, "in.txt")
 	source := `var s string = "abc"
 var a array[int] = [1,2,3]
-write size s, "-", s[1], "|"
+push s, "d", "e"
+push a, 4, 5
 pop s
 pop a
-write s, "|", size a`
+write s, "|", size s, "|", a, "|", size a`
 	if err := os.WriteFile(srcPath, []byte(source), 0o600); err != nil {
 		t.Fatalf("write source file: %v", err)
 	}
@@ -56,7 +57,7 @@ write s, "|", size a`
 	if err != nil {
 		t.Fatalf("run command failed: %v\nOutput:\n%s", err, string(runOut))
 	}
-	if strings.TrimSpace(string(runOut)) != "3-b|ab|2" {
+	if strings.TrimSpace(string(runOut)) != "abcd|4|[1, 2, 3, 4]|4" {
 		t.Fatalf("unexpected run output: %q", string(runOut))
 	}
 }

@@ -59,6 +59,15 @@ type PopStmt struct {
 func (s *PopStmt) stmtNode()          {}
 func (s *PopStmt) Position() Position { return s.Pos }
 
+type PushStmt struct {
+	Pos    Position
+	Target Expr // IdentifierExpr or IndexExpr
+	Values []Expr
+}
+
+func (s *PushStmt) stmtNode()          {}
+func (s *PushStmt) Position() Position { return s.Pos }
+
 type IfClause struct {
 	Pos       Position
 	Condition Expr

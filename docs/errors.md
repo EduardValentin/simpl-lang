@@ -25,6 +25,7 @@ Every diagnostic includes:
 - `TYPE_CONST_REASSIGN`: Attempt to assign/read into a constant.
 - `TYPE_INVALID_INDEX`: Invalid index usage (non-sequence target or non-int index).
 - `TYPE_INVALID_SIZE`: Invalid `size` usage on a non-array/non-string expression.
+- `TYPE_INVALID_PUSH`: Invalid `push` usage on a non-array/non-string target.
 - `TYPE_INVALID_POP`: Invalid `pop` usage on a non-array/non-string target.
 - `TYPE_REDECLARED_IDENTIFIER`: Duplicate declaration in same scope.
 

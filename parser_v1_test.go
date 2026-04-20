@@ -62,6 +62,7 @@ a[1] = 9`
 func TestParserBuildsSequencePrimitives(t *testing.T) {
 	source := `var s string = "abc"
 write size s
+push s, "d", "e"
 pop s
 s[1] = "x"`
 	tokens, ldiags := lexSource(source)
@@ -72,8 +73,8 @@ s[1] = "x"`
 	if len(pdiags) != 0 {
 		t.Fatalf("unexpected parser diagnostics: %+v", pdiags)
 	}
-	if len(prog.Statements) != 4 {
-		t.Fatalf("expected 4 statements, got %d", len(prog.Statements))
+	if len(prog.Statements) != 5 {
+		t.Fatalf("expected 5 statements, got %d", len(prog.Statements))
 	}
 
 	writeStmt, ok := prog.Statements[1].(*WriteStmt)
@@ -87,15 +88,39 @@ s[1] = "x"`
 		t.Fatalf("expected size expression, got %T", writeStmt.Values[0])
 	}
 
-	if _, ok := prog.Statements[2].(*PopStmt); !ok {
-		t.Fatalf("expected pop statement, got %T", prog.Statements[2])
+	pushStmt, ok := prog.Statements[2].(*PushStmt)
+	if !ok {
+		t.Fatalf("expected push statement, got %T", prog.Statements[2])
+	}
+	if len(pushStmt.Values) != 2 {
+		t.Fatalf("expected 2 push values, got %d", len(pushStmt.Values))
 	}
 
-	assignStmt, ok := prog.Statements[3].(*AssignStmt)
+	if _, ok := prog.Statements[3].(*PopStmt); !ok {
+		t.Fatalf("expected pop statement, got %T", prog.Statements[3])
+	}
+
+	assignStmt, ok := prog.Statements[4].(*AssignStmt)
 	if !ok {
-		t.Fatalf("expected assignment statement, got %T", prog.Statements[3])
+		t.Fatalf("expected assignment statement, got %T", prog.Statements[4])
 	}
 	if _, ok := assignStmt.Target.(*IndexExpr); !ok {
 		t.Fatalf("expected index target, got %T", assignStmt.Target)
+	}
+}
+
+func TestParserRejectsPushWithoutValue(t *testing.T) {
+	source := `var a array[int] = [1]
+push a`
+	tokens, ldiags := lexSource(source)
+	if len(ldiags) != 0 {
+		t.Fatalf("unexpected lexer diagnostics: %+v", ldiags)
+	}
+	_, pdiags := parseProgram(tokens)
+	if len(pdiags) == 0 {
+		t.Fatal("expected parser diagnostics")
+	}
+	if pdiags[0].Code != "PARSE_EXPECTED_TOKEN" {
+		t.Fatalf("unexpected code: %s", pdiags[0].Code)
 	}
 }

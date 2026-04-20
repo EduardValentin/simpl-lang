@@ -106,12 +106,13 @@ func TestRuntimeStringSequenceOperations(t *testing.T) {
 	source := `
 var s string = "a\u0103c"
 write size s, "|", s[1], "|"
+push s, "d", "e"
 s[1] = "x"
 pop s
 write s
 `
 	res := mustRun(t, source, "", RunOptions{})
-	if res.Stdout != "3|ă|ax" {
+	if res.Stdout != "3|ă|axcd" {
 		t.Fatalf("unexpected stdout: %q", res.Stdout)
 	}
 }
@@ -119,11 +120,26 @@ write s
 func TestRuntimePopNestedStringInArray(t *testing.T) {
 	source := `
 var words array[string] = ["abc", "xy"]
+push words[0], "d"
 pop words[0]
 write words[0], "|", words[1]
 `
 	res := mustRun(t, source, "", RunOptions{})
-	if res.Stdout != "ab|xy" {
+	if res.Stdout != "abc|xy" {
+		t.Fatalf("unexpected stdout: %q", res.Stdout)
+	}
+}
+
+func TestRuntimeArrayPushAndNestedPush(t *testing.T) {
+	source := `
+var a array[int] = [1]
+push a, 2, 3
+var nested array[array[int]] = [[7], [8, 9]]
+push nested[0], 10, 11
+write a, "|", nested[0], "|", size nested[0]
+`
+	res := mustRun(t, source, "", RunOptions{})
+	if res.Stdout != "[1, 2, 3]|[7, 10, 11]|3" {
 		t.Fatalf("unexpected stdout: %q", res.Stdout)
 	}
 }
@@ -139,6 +155,24 @@ s[1] = "xy"
 	}
 	if res.Diagnostics[0].Code != "RUNTIME_TYPE" {
 		t.Fatalf("unexpected code: %s", res.Diagnostics[0].Code)
+	}
+}
+
+func TestRuntimeStringPushRequiresSingleRune(t *testing.T) {
+	emptyRes := Run("var s string = \"abc\"\npush s, \"\"", "", RunOptions{})
+	if len(emptyRes.Diagnostics) == 0 {
+		t.Fatal("expected empty-string diagnostics")
+	}
+	if emptyRes.Diagnostics[0].Code != "RUNTIME_TYPE" {
+		t.Fatalf("unexpected empty-string code: %s", emptyRes.Diagnostics[0].Code)
+	}
+
+	multiRes := Run("var s string = \"abc\"\npush s, \"ab\"", "", RunOptions{})
+	if len(multiRes.Diagnostics) == 0 {
+		t.Fatal("expected multi-rune diagnostics")
+	}
+	if multiRes.Diagnostics[0].Code != "RUNTIME_TYPE" {
+		t.Fatalf("unexpected multi-rune code: %s", multiRes.Diagnostics[0].Code)
 	}
 }
 

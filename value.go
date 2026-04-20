@@ -12,6 +12,7 @@ type Value struct {
 	Float  float64
 	Bool   bool
 	String string
+	Runes  []rune
 	Array  []Value
 }
 
@@ -24,7 +25,7 @@ func zeroValue(t Type) Value {
 	case TypeBool:
 		return Value{Type: t, Bool: false}
 	case TypeString:
-		return Value{Type: t, String: ""}
+		return newStringValueOfType(t, "")
 	case TypeArray:
 		return Value{Type: t, Array: make([]Value, 0)}
 	default:
@@ -34,8 +35,17 @@ func zeroValue(t Type) Value {
 
 func cloneValue(v Value) Value {
 	out := v
-	if v.Type.Kind == TypeArray {
+	switch v.Type.Kind {
+	case TypeString:
+		runes := stringRunes(v)
+		out.Runes = make([]rune, len(runes), cap(runes))
+		copy(out.Runes, runes)
+		out.String = string(out.Runes)
+	case TypeArray:
 		out.Array = make([]Value, len(v.Array))
+		if cap(v.Array) > len(v.Array) {
+			out.Array = make([]Value, len(v.Array), cap(v.Array))
+		}
 		for i := range v.Array {
 			out.Array[i] = cloneValue(v.Array[i])
 		}
@@ -119,11 +129,64 @@ func parseInputToken(token string, t Type) (Value, error) {
 		if len(token) >= 2 && token[0] == '"' && token[len(token)-1] == '"' {
 			parsed, err := strconv.Unquote(token)
 			if err == nil {
-				return Value{Type: t, String: parsed}, nil
+				return newStringValueOfType(t, parsed), nil
 			}
 		}
-		return Value{Type: t, String: token}, nil
+		return newStringValueOfType(t, token), nil
 	default:
 		return Value{}, fmt.Errorf("read only supports scalar variables")
 	}
+}
+
+func newStringValue(s string) Value {
+	return newStringValueOfType(Type{Kind: TypeString}, s)
+}
+
+func newStringValueOfType(t Type, s string) Value {
+	return newStringValueFromRunes(t, []rune(s))
+}
+
+func newStringValueFromRunes(t Type, runes []rune) Value {
+	return Value{Type: t, String: string(runes), Runes: runes}
+}
+
+func stringRunes(v Value) []rune {
+	if v.Type.Kind != TypeString {
+		return nil
+	}
+	if v.Runes != nil {
+		return v.Runes
+	}
+	return []rune(v.String)
+}
+
+func nextGrowthCapacity(currentCap, needed int) int {
+	newCap := currentCap
+	if newCap < 4 {
+		newCap = 4
+	}
+	for newCap < needed {
+		newCap *= 2
+	}
+	return newCap
+}
+
+func growValueSlice(values []Value, extra int) []Value {
+	needed := len(values) + extra
+	if needed <= cap(values) {
+		return values
+	}
+	grown := make([]Value, len(values), nextGrowthCapacity(cap(values), needed))
+	copy(grown, values)
+	return grown
+}
+
+func growRuneSlice(runes []rune, extra int) []rune {
+	needed := len(runes) + extra
+	if needed <= cap(runes) {
+		return runes
+	}
+	grown := make([]rune, len(runes), nextGrowthCapacity(cap(runes), needed))
+	copy(grown, runes)
+	return grown
 }

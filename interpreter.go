@@ -95,6 +95,8 @@ func (i *interpreter) execStmt(stmt Stmt) {
 				i.onStdout(chunk, i.steps)
 			}
 		}
+	case *PushStmt:
+		i.execPush(s)
 	case *PopStmt:
 		i.execPop(s)
 	case *IfStmt:
@@ -239,6 +241,41 @@ func (i *interpreter) execPop(stmt *PopStmt) {
 	i.scopes[scopeIdx][name] = root
 }
 
+func (i *interpreter) execPush(stmt *PushStmt) {
+	name, idxExprs, ok := flattenIndexTarget(stmt.Target)
+	if !ok {
+		i.addRuntimeDiag("RUNTIME_TYPE", "Invalid push target.", stmt.Pos, "Use a variable or indexed target like name[0].")
+		return
+	}
+	indexes, ok := i.evalIndexExpressions(idxExprs)
+	if !ok {
+		return
+	}
+
+	root, scopeIdx, ok := i.lookupVar(name)
+	if !ok {
+		i.addRuntimeDiag("RUNTIME_UNDECLARED", fmt.Sprintf("Variable '%s' is not declared.", name), stmt.Pos, "Declare it before assignment.")
+		return
+	}
+	if !root.mutable {
+		i.addRuntimeDiag("RUNTIME_CONST_REASSIGN", fmt.Sprintf("Cannot assign into constant '%s'.", name), stmt.Pos, "Use var for mutable arrays and strings.")
+		return
+	}
+
+	mutable := cloneValue(root.value)
+	if !mutateValueAtIndexes(&mutable, indexes, stmt.Pos, i, func(target *Value) bool {
+		values, ok := i.evalPushValues(target.Type, stmt.Values)
+		if !ok {
+			return false
+		}
+		return pushValues(target, values, stmt.Pos, i)
+	}) {
+		return
+	}
+	root.value = mutable
+	i.scopes[scopeIdx][name] = root
+}
+
 func (i *interpreter) evalCondition(expr Expr) bool {
 	v, ok := i.evalExpr(expr)
 	if !ok {
@@ -262,7 +299,7 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 		case bool:
 			return Value{Type: Type{Kind: TypeBool}, Bool: v}, true
 		case string:
-			return Value{Type: Type{Kind: TypeString}, String: v}, true
+			return newStringValue(v), true
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "Invalid literal value.", e.Pos, "Use supported literal types.")
 			return Value{}, false
@@ -308,7 +345,7 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 		case TypeArray:
 			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(value.Array))}, true
 		case TypeString:
-			return Value{Type: Type{Kind: TypeInt}, Int: int64(len([]rune(value.String)))}, true
+			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(stringRunes(value)))}, true
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "size requires an array or string value.", e.Pos, "Use size only on arrays and strings.")
 			return Value{}, false
@@ -368,12 +405,12 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 			}
 			return cloneValue(collection.Array[idxValue.Int]), true
 		case TypeString:
-			runes := []rune(collection.String)
+			runes := stringRunes(collection)
 			if idxValue.Int < 0 || idxValue.Int >= int64(len(runes)) {
 				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within string bounds.")
 				return Value{}, false
 			}
-			return Value{Type: Type{Kind: TypeString}, String: string(runes[idxValue.Int])}, true
+			return newStringValueFromRunes(Type{Kind: TypeString}, []rune{runes[idxValue.Int]}), true
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "Index target is not an array or string.", e.Pos, "Use indexing only on arrays and strings.")
 			return Value{}, false
@@ -388,7 +425,10 @@ func (i *interpreter) evalBinary(expr *BinaryExpr, left, right Value) (Value, bo
 	switch expr.Operator {
 	case TokenPlus:
 		if left.Type.Kind == TypeString && right.Type.Kind == TypeString {
-			return Value{Type: Type{Kind: TypeString}, String: left.String + right.String}, true
+			combined := make([]rune, 0, len(stringRunes(left))+len(stringRunes(right)))
+			combined = append(combined, stringRunes(left)...)
+			combined = append(combined, stringRunes(right)...)
+			return newStringValueFromRunes(Type{Kind: TypeString}, combined), true
 		}
 		if left.Type.Kind == TypeInt && right.Type.Kind == TypeInt {
 			return Value{Type: Type{Kind: TypeInt}, Int: left.Int + right.Int}, true
@@ -582,15 +622,86 @@ func popValue(target *Value, pos Position, interp *interpreter) bool {
 		target.Array = target.Array[:len(target.Array)-1]
 		return true
 	case TypeString:
-		runes := []rune(target.String)
+		runes := stringRunes(*target)
 		if len(runes) == 0 {
 			interp.addRuntimeDiag("RUNTIME_POP_EMPTY", "Cannot pop from an empty string.", pos, "Ensure the string has at least one character before popping.")
 			return false
 		}
-		target.String = string(runes[:len(runes)-1])
+		target.Runes = runes[:len(runes)-1]
+		target.String = string(target.Runes)
 		return true
 	default:
 		interp.addRuntimeDiag("RUNTIME_TYPE", "pop requires an array or string target.", pos, "Use pop only on arrays and strings.")
+		return false
+	}
+}
+
+func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bool) {
+	values := make([]Value, 0, len(exprs))
+	switch targetType.Kind {
+	case TypeArray:
+		if targetType.Elem == nil {
+			i.addRuntimeDiag("RUNTIME_TYPE", "push requires an array or string target.", exprs[0].Position(), "Use push only on arrays and strings.")
+			return nil, false
+		}
+		for _, expr := range exprs {
+			value, ok := i.evalExpr(expr)
+			if !ok {
+				return nil, false
+			}
+			if !value.Type.Equals(*targetType.Elem) {
+				i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot push %s into array of %s.", value.Type.String(), targetType.Elem.String()), expr.Position(), "Push values with the array element type.")
+				return nil, false
+			}
+			values = append(values, cloneValue(value))
+		}
+	case TypeString:
+		for _, expr := range exprs {
+			value, ok := i.evalExpr(expr)
+			if !ok {
+				return nil, false
+			}
+			if value.Type.Kind != TypeString {
+				i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot push %s into string target.", value.Type.String()), expr.Position(), "Push string values into strings.")
+				return nil, false
+			}
+			if len(stringRunes(value)) != 1 {
+				i.addRuntimeDiag("RUNTIME_TYPE", "String push requires a single-character string.", expr.Position(), "Push a string containing exactly one character.")
+				return nil, false
+			}
+			values = append(values, cloneValue(value))
+		}
+	default:
+		i.addRuntimeDiag("RUNTIME_TYPE", "push requires an array or string target.", exprs[0].Position(), "Use push only on arrays and strings.")
+		return nil, false
+	}
+	return values, true
+}
+
+func pushValues(target *Value, values []Value, pos Position, interp *interpreter) bool {
+	switch target.Type.Kind {
+	case TypeArray:
+		target.Array = growValueSlice(target.Array, len(values))
+		for _, value := range values {
+			target.Array = append(target.Array, cloneValue(value))
+		}
+		return true
+	case TypeString:
+		runes := stringRunes(*target)
+		runes = growRuneSlice(runes, len(values))
+		for _, value := range values {
+			valueRunes := stringRunes(value)
+			if len(valueRunes) != 1 {
+				interp.addRuntimeDiag("RUNTIME_TYPE", "String push requires a single-character string.", pos, "Push a string containing exactly one character.")
+				return false
+			}
+			runes = append(runes, valueRunes[0])
+		}
+		target.Runes = runes
+		target.String = string(runes)
+		return true
+	default:
+		interp.addRuntimeDiag("RUNTIME_TYPE", "push requires an array or string target.", pos, "Use push only on arrays and strings.")
 		return false
 	}
 }
@@ -613,21 +724,22 @@ func mutateValueAtIndexes(root *Value, indexes []int64, pos Position, interp *in
 		root.Array[idx] = child
 		return true
 	case TypeString:
-		runes := []rune(root.String)
+		runes := stringRunes(*root)
 		if idx < 0 || idx >= int64(len(runes)) {
 			interp.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", pos, "Use an index within string bounds.")
 			return false
 		}
-		child := Value{Type: Type{Kind: TypeString}, String: string(runes[idx])}
+		child := newStringValueFromRunes(Type{Kind: TypeString}, []rune{runes[idx]})
 		if !mutateValueAtIndexes(&child, indexes[1:], pos, interp, mutate) {
 			return false
 		}
-		childRunes := []rune(child.String)
+		childRunes := stringRunes(child)
 		if len(childRunes) != 1 {
 			interp.addRuntimeDiag("RUNTIME_TYPE", "String index assignment requires a single-character string.", pos, "Assign a string containing exactly one character.")
 			return false
 		}
 		runes[idx] = childRunes[0]
+		root.Runes = runes
 		root.String = string(runes)
 		return true
 	default:

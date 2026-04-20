@@ -77,6 +77,38 @@ func (c *checker) checkStmt(stmt Stmt) {
 		if targetType.Kind != TypeArray && targetType.Kind != TypeString {
 			c.addDiag("TYPE_INVALID_POP", "pop requires an array or string target.", s.Target.Position(), "Use pop only with mutable arrays and strings.")
 		}
+	case *PushStmt:
+		targetType := c.checkExpr(s.Target, nil)
+		if targetType.Kind == TypeInvalid {
+			return
+		}
+		if !c.isMutableTarget(s.Target) {
+			c.addDiag("TYPE_CONST_REASSIGN", "Cannot assign to constant target.", s.Target.Position(), "Use a mutable variable declared with 'var'.")
+			return
+		}
+		switch targetType.Kind {
+		case TypeArray:
+			if targetType.Elem == nil {
+				c.addDiag("TYPE_INVALID_PUSH", "push requires an array or string target.", s.Target.Position(), "Use push only with mutable arrays and strings.")
+				return
+			}
+			for _, valueExpr := range s.Values {
+				got := c.checkExpr(valueExpr, targetType.Elem)
+				if got.Kind != TypeInvalid && !got.Equals(*targetType.Elem) {
+					c.addDiag("TYPE_MISMATCH", fmt.Sprintf("Cannot push %s into array of %s.", got.String(), targetType.Elem.String()), valueExpr.Position(), "Push values with the array element type.")
+				}
+			}
+		case TypeString:
+			expected := Type{Kind: TypeString}
+			for _, valueExpr := range s.Values {
+				got := c.checkExpr(valueExpr, &expected)
+				if got.Kind != TypeInvalid && !got.Equals(expected) {
+					c.addDiag("TYPE_MISMATCH", fmt.Sprintf("Cannot push %s into string target.", got.String()), valueExpr.Position(), "Push string values into strings.")
+				}
+			}
+		default:
+			c.addDiag("TYPE_INVALID_PUSH", "push requires an array or string target.", s.Target.Position(), "Use push only with mutable arrays and strings.")
+		}
 	case *IfStmt:
 		c.checkConditionBool(s.Primary.Condition)
 		c.checkStmt(s.Primary.Block)

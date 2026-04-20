@@ -37,6 +37,8 @@ func (p *parser) parseStatement() Stmt {
 		return p.parseRead()
 	case TokenWrite:
 		return p.parseWrite()
+	case TokenPush:
+		return p.parsePush()
 	case TokenPop:
 		return p.parsePop()
 	case TokenIf:
@@ -53,7 +55,7 @@ func (p *parser) parseStatement() Stmt {
 		return nil
 	default:
 		tok := p.peek()
-		p.addDiag("PARSE_UNEXPECTED_TOKEN", fmt.Sprintf("Unexpected token '%s'.", tok.Type.String()), tok.Pos, "Start a statement with var/const/read/write/pop/if/while/for or an assignment.")
+		p.addDiag("PARSE_UNEXPECTED_TOKEN", fmt.Sprintf("Unexpected token '%s'.", tok.Type.String()), tok.Pos, "Start a statement with var/const/read/write/push/pop/if/while/for or an assignment.")
 		p.advance()
 		return nil
 	}
@@ -150,6 +152,23 @@ func (p *parser) parsePop() Stmt {
 		return nil
 	}
 	return &PopStmt{Pos: kw.Pos, Target: target}
+}
+
+func (p *parser) parsePush() Stmt {
+	kw := p.advance()
+	target := p.parseAssignmentTarget()
+	if target == nil {
+		return nil
+	}
+	if _, ok := p.consume(TokenComma, "PARSE_EXPECTED_TOKEN", "Expected ',' after push target.", "Use: push target, value1, value2"); !ok {
+		return nil
+	}
+	values := make([]Expr, 0, 4)
+	values = append(values, p.parseExpression())
+	for p.match(TokenComma) {
+		values = append(values, p.parseExpression())
+	}
+	return &PushStmt{Pos: kw.Pos, Target: target, Values: values}
 }
 
 func (p *parser) parseIf() Stmt {
@@ -449,7 +468,7 @@ func (p *parser) synchronize() {
 	p.advance()
 	for !p.isAtEnd() {
 		switch p.peek().Type {
-		case TokenVar, TokenConst, TokenRead, TokenWrite, TokenPop, TokenIf, TokenWhile, TokenFor, TokenRBrace:
+		case TokenVar, TokenConst, TokenRead, TokenWrite, TokenPush, TokenPop, TokenIf, TokenWhile, TokenFor, TokenRBrace:
 			return
 		default:
 			p.advance()
