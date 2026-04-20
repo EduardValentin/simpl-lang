@@ -23,12 +23,15 @@ Every diagnostic includes:
 - `TYPE_MISMATCH`: Expression or assignment type mismatch.
 - `TYPE_UNDECLARED_IDENTIFIER`: Variable used before declaration.
 - `TYPE_CONST_REASSIGN`: Attempt to assign/read into a constant.
-- `TYPE_INVALID_INDEX`: Invalid index usage (non-array target or non-int index).
+- `TYPE_INVALID_INDEX`: Invalid index usage (non-sequence target or non-int index).
+- `TYPE_INVALID_SIZE`: Invalid `size` usage on a non-array/non-string expression.
+- `TYPE_INVALID_POP`: Invalid `pop` usage on a non-array/non-string target.
 - `TYPE_REDECLARED_IDENTIFIER`: Duplicate declaration in same scope.
 
 ## Runtime Errors
 - `RUNTIME_DIV_ZERO`: Division or modulo by zero.
-- `RUNTIME_INDEX_OOB`: Array index out of bounds.
+- `RUNTIME_INDEX_OOB`: Array/string index out of bounds.
+- `RUNTIME_POP_EMPTY`: Attempt to pop from an empty array or string.
 - `RUNTIME_READ_EOF`: Not enough input tokens for `read`.
 - `RUNTIME_READ_PARSE`: Input token cannot be parsed to target type.
 - `RUNTIME_TYPE`: Runtime type safety violation.

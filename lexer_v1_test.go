@@ -50,3 +50,24 @@ func TestLexerUnknownCharacter(t *testing.T) {
 		t.Fatalf("unexpected code: %s", diags[0].Code)
 	}
 }
+
+func TestLexerRecognizesSequenceKeywords(t *testing.T) {
+	tokens, diags := lexSource("write size name\npop name")
+	if len(diags) != 0 {
+		t.Fatalf("unexpected diagnostics: %+v", diags)
+	}
+
+	want := []TokenType{
+		TokenWrite, TokenSize, TokenIdentifier,
+		TokenPop, TokenIdentifier,
+		TokenEOF,
+	}
+	if len(tokens) != len(want) {
+		t.Fatalf("token count mismatch: got %d want %d", len(tokens), len(want))
+	}
+	for i := range want {
+		if tokens[i].Type != want[i] {
+			t.Fatalf("token[%d] mismatch: got %s want %s", i, tokens[i].Type.String(), want[i].String())
+		}
+	}
+}

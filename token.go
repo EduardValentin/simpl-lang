@@ -20,10 +20,12 @@ const (
 	TokenConst
 	TokenRead
 	TokenWrite
+	TokenPop
 	TokenIf
 	TokenElse
 	TokenFor
 	TokenFrom
+	TokenSize
 	TokenUntil
 	TokenStep
 	TokenWhile
@@ -80,6 +82,8 @@ func (t TokenType) String() string {
 		return "read"
 	case TokenWrite:
 		return "write"
+	case TokenPop:
+		return "pop"
 	case TokenIf:
 		return "if"
 	case TokenElse:
@@ -88,6 +92,8 @@ func (t TokenType) String() string {
 		return "for"
 	case TokenFrom:
 		return "from"
+	case TokenSize:
+		return "size"
 	case TokenUntil:
 		return "until"
 	case TokenStep:
@@ -161,10 +167,12 @@ var keywordTokens = map[string]TokenType{
 	"const":  TokenConst,
 	"read":   TokenRead,
 	"write":  TokenWrite,
+	"pop":    TokenPop,
 	"if":     TokenIf,
 	"else":   TokenElse,
 	"for":    TokenFor,
 	"from":   TokenFrom,
+	"size":   TokenSize,
 	"until":  TokenUntil,
 	"step":   TokenStep,
 	"while":  TokenWhile,

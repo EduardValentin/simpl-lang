@@ -102,6 +102,64 @@ write a[1][0]
 	}
 }
 
+func TestRuntimeStringSequenceOperations(t *testing.T) {
+	source := `
+var s string = "a\u0103c"
+write size s, "|", s[1], "|"
+s[1] = "x"
+pop s
+write s
+`
+	res := mustRun(t, source, "", RunOptions{})
+	if res.Stdout != "3|ă|ax" {
+		t.Fatalf("unexpected stdout: %q", res.Stdout)
+	}
+}
+
+func TestRuntimePopNestedStringInArray(t *testing.T) {
+	source := `
+var words array[string] = ["abc", "xy"]
+pop words[0]
+write words[0], "|", words[1]
+`
+	res := mustRun(t, source, "", RunOptions{})
+	if res.Stdout != "ab|xy" {
+		t.Fatalf("unexpected stdout: %q", res.Stdout)
+	}
+}
+
+func TestRuntimeStringIndexAssignmentRequiresSingleRune(t *testing.T) {
+	source := `
+var s string = "abc"
+s[1] = "xy"
+`
+	res := Run(source, "", RunOptions{})
+	if len(res.Diagnostics) == 0 {
+		t.Fatal("expected diagnostics")
+	}
+	if res.Diagnostics[0].Code != "RUNTIME_TYPE" {
+		t.Fatalf("unexpected code: %s", res.Diagnostics[0].Code)
+	}
+}
+
+func TestRuntimePopEmptySequence(t *testing.T) {
+	stringRes := Run("var s string = \"\"\npop s", "", RunOptions{})
+	if len(stringRes.Diagnostics) == 0 {
+		t.Fatal("expected string diagnostics")
+	}
+	if stringRes.Diagnostics[0].Code != "RUNTIME_POP_EMPTY" {
+		t.Fatalf("unexpected string code: %s", stringRes.Diagnostics[0].Code)
+	}
+
+	arrayRes := Run("var a array[int] = []\npop a", "", RunOptions{})
+	if len(arrayRes.Diagnostics) == 0 {
+		t.Fatal("expected array diagnostics")
+	}
+	if arrayRes.Diagnostics[0].Code != "RUNTIME_POP_EMPTY" {
+		t.Fatalf("unexpected array code: %s", arrayRes.Diagnostics[0].Code)
+	}
+}
+
 func TestRuntimeReadTokenBased(t *testing.T) {
 	source := `
 var x int

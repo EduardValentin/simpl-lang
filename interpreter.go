@@ -95,6 +95,8 @@ func (i *interpreter) execStmt(stmt Stmt) {
 				i.onStdout(chunk, i.steps)
 			}
 		}
+	case *PopStmt:
+		i.execPop(s)
 	case *IfStmt:
 		if i.evalCondition(s.Primary.Condition) {
 			i.execStmt(s.Primary.Block)
@@ -206,6 +208,37 @@ func (i *interpreter) execRead(stmt *ReadStmt) {
 	i.scopes[scopeIdx][stmt.Name] = v
 }
 
+func (i *interpreter) execPop(stmt *PopStmt) {
+	name, idxExprs, ok := flattenIndexTarget(stmt.Target)
+	if !ok {
+		i.addRuntimeDiag("RUNTIME_TYPE", "Invalid pop target.", stmt.Pos, "Use a variable or indexed target like name[0].")
+		return
+	}
+	indexes, ok := i.evalIndexExpressions(idxExprs)
+	if !ok {
+		return
+	}
+
+	root, scopeIdx, ok := i.lookupVar(name)
+	if !ok {
+		i.addRuntimeDiag("RUNTIME_UNDECLARED", fmt.Sprintf("Variable '%s' is not declared.", name), stmt.Pos, "Declare it before assignment.")
+		return
+	}
+	if !root.mutable {
+		i.addRuntimeDiag("RUNTIME_CONST_REASSIGN", fmt.Sprintf("Cannot assign into constant '%s'.", name), stmt.Pos, "Use var for mutable arrays and strings.")
+		return
+	}
+
+	mutable := cloneValue(root.value)
+	if !mutateValueAtIndexes(&mutable, indexes, stmt.Pos, i, func(target *Value) bool {
+		return popValue(target, stmt.Pos, i)
+	}) {
+		return
+	}
+	root.value = mutable
+	i.scopes[scopeIdx][name] = root
+}
+
 func (i *interpreter) evalCondition(expr Expr) bool {
 	v, ok := i.evalExpr(expr)
 	if !ok {
@@ -266,6 +299,20 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 			i.addRuntimeDiag("RUNTIME_TYPE", "Unsupported unary operator.", e.Pos, "Use supported unary operators.")
 			return Value{}, false
 		}
+	case *SizeExpr:
+		value, ok := i.evalExpr(e.Value)
+		if !ok {
+			return Value{}, false
+		}
+		switch value.Type.Kind {
+		case TypeArray:
+			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(value.Array))}, true
+		case TypeString:
+			return Value{Type: Type{Kind: TypeInt}, Int: int64(len([]rune(value.String)))}, true
+		default:
+			i.addRuntimeDiag("RUNTIME_TYPE", "size requires an array or string value.", e.Pos, "Use size only on arrays and strings.")
+			return Value{}, false
+		}
 	case *BinaryExpr:
 		left, ok := i.evalExpr(e.Left)
 		if !ok {
@@ -305,23 +352,32 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 		if !ok {
 			return Value{}, false
 		}
-		if collection.Type.Kind != TypeArray {
-			i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Index target is not an array.", e.Pos, "Use indexing only on arrays.")
-			return Value{}, false
-		}
 		idxValue, ok := i.evalExpr(e.Index)
 		if !ok {
 			return Value{}, false
 		}
 		if idxValue.Type.Kind != TypeInt {
-			i.addRuntimeDiag("RUNTIME_TYPE", "Array index must be int.", e.Index.Position(), "Use an integer index.")
+			i.addRuntimeDiag("RUNTIME_TYPE", "Sequence index must be int.", e.Index.Position(), "Use an integer index.")
 			return Value{}, false
 		}
-		if idxValue.Int < 0 || idxValue.Int >= int64(len(collection.Array)) {
-			i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Array index is out of range.", e.Index.Position(), "Use an index within array bounds.")
+		switch collection.Type.Kind {
+		case TypeArray:
+			if idxValue.Int < 0 || idxValue.Int >= int64(len(collection.Array)) {
+				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within array bounds.")
+				return Value{}, false
+			}
+			return cloneValue(collection.Array[idxValue.Int]), true
+		case TypeString:
+			runes := []rune(collection.String)
+			if idxValue.Int < 0 || idxValue.Int >= int64(len(runes)) {
+				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within string bounds.")
+				return Value{}, false
+			}
+			return Value{Type: Type{Kind: TypeString}, String: string(runes[idxValue.Int])}, true
+		default:
+			i.addRuntimeDiag("RUNTIME_TYPE", "Index target is not an array or string.", e.Pos, "Use indexing only on arrays and strings.")
 			return Value{}, false
 		}
-		return cloneValue(collection.Array[idxValue.Int]), true
 	default:
 		i.addRuntimeDiag("RUNTIME_TYPE", "Unsupported expression node.", expr.Position(), "Use a supported expression form.")
 		return Value{}, false
@@ -439,7 +495,7 @@ func (i *interpreter) assignTarget(target Expr, value Value) {
 	case *IndexExpr:
 		i.assignIndexedTarget(t, value)
 	default:
-		i.addRuntimeDiag("RUNTIME_TYPE", "Invalid assignment target.", target.Position(), "Assign to a variable or indexed array element.")
+		i.addRuntimeDiag("RUNTIME_TYPE", "Invalid assignment target.", target.Position(), "Assign to a variable or indexed array/string element.")
 	}
 }
 
@@ -450,17 +506,9 @@ func (i *interpreter) assignIndexedTarget(expr *IndexExpr, value Value) {
 		return
 	}
 
-	varIndexes := make([]int64, len(idxExprs))
-	for idx := range idxExprs {
-		v, ok := i.evalExpr(idxExprs[idx])
-		if !ok {
-			return
-		}
-		if v.Type.Kind != TypeInt {
-			i.addRuntimeDiag("RUNTIME_TYPE", "Array index must be int.", idxExprs[idx].Position(), "Use integer indexes.")
-			return
-		}
-		varIndexes[idx] = v.Int
+	indexes, ok := i.evalIndexExpressions(idxExprs)
+	if !ok {
+		return
 	}
 
 	root, scopeIdx, ok := i.lookupVar(name)
@@ -469,12 +517,14 @@ func (i *interpreter) assignIndexedTarget(expr *IndexExpr, value Value) {
 		return
 	}
 	if !root.mutable {
-		i.addRuntimeDiag("RUNTIME_CONST_REASSIGN", fmt.Sprintf("Cannot assign into constant '%s'.", name), expr.Pos, "Use var for mutable arrays.")
+		i.addRuntimeDiag("RUNTIME_CONST_REASSIGN", fmt.Sprintf("Cannot assign into constant '%s'.", name), expr.Pos, "Use var for mutable arrays and strings.")
 		return
 	}
 
 	mutable := cloneValue(root.value)
-	if !setValueAtIndexes(&mutable, varIndexes, value, expr.Pos, i) {
+	if !mutateValueAtIndexes(&mutable, indexes, expr.Pos, i, func(target *Value) bool {
+		return assignValue(target, value, expr.Pos, i)
+	}) {
 		return
 	}
 	root.value = mutable
@@ -497,30 +547,93 @@ func flattenIndexTarget(expr Expr) (string, []Expr, bool) {
 	}
 }
 
-func setValueAtIndexes(root *Value, indexes []int64, newValue Value, pos Position, interp *interpreter) bool {
-	if len(indexes) == 0 {
-		if !root.Type.Equals(newValue.Type) {
-			interp.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot assign %s to %s.", newValue.Type.String(), root.Type.String()), pos, "Assign values with matching element type.")
+func (i *interpreter) evalIndexExpressions(idxExprs []Expr) ([]int64, bool) {
+	indexes := make([]int64, len(idxExprs))
+	for idx := range idxExprs {
+		v, ok := i.evalExpr(idxExprs[idx])
+		if !ok {
+			return nil, false
+		}
+		if v.Type.Kind != TypeInt {
+			i.addRuntimeDiag("RUNTIME_TYPE", "Sequence index must be int.", idxExprs[idx].Position(), "Use integer indexes.")
+			return nil, false
+		}
+		indexes[idx] = v.Int
+	}
+	return indexes, true
+}
+
+func assignValue(target *Value, newValue Value, pos Position, interp *interpreter) bool {
+	if !target.Type.Equals(newValue.Type) {
+		interp.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot assign %s to %s.", newValue.Type.String(), target.Type.String()), pos, "Assign values with matching element type.")
+		return false
+	}
+	*target = cloneValue(newValue)
+	return true
+}
+
+func popValue(target *Value, pos Position, interp *interpreter) bool {
+	switch target.Type.Kind {
+	case TypeArray:
+		if len(target.Array) == 0 {
+			interp.addRuntimeDiag("RUNTIME_POP_EMPTY", "Cannot pop from an empty array.", pos, "Ensure the array has at least one element before popping.")
 			return false
 		}
-		*root = cloneValue(newValue)
+		target.Array = target.Array[:len(target.Array)-1]
 		return true
-	}
-	if root.Type.Kind != TypeArray {
-		interp.addRuntimeDiag("RUNTIME_TYPE", "Indexed assignment target is not an array.", pos, "Use indexing only on arrays.")
+	case TypeString:
+		runes := []rune(target.String)
+		if len(runes) == 0 {
+			interp.addRuntimeDiag("RUNTIME_POP_EMPTY", "Cannot pop from an empty string.", pos, "Ensure the string has at least one character before popping.")
+			return false
+		}
+		target.String = string(runes[:len(runes)-1])
+		return true
+	default:
+		interp.addRuntimeDiag("RUNTIME_TYPE", "pop requires an array or string target.", pos, "Use pop only on arrays and strings.")
 		return false
+	}
+}
+
+func mutateValueAtIndexes(root *Value, indexes []int64, pos Position, interp *interpreter, mutate func(target *Value) bool) bool {
+	if len(indexes) == 0 {
+		return mutate(root)
 	}
 	idx := indexes[0]
-	if idx < 0 || idx >= int64(len(root.Array)) {
-		interp.addRuntimeDiag("RUNTIME_INDEX_OOB", "Array index is out of range.", pos, "Use an index within array bounds.")
+	switch root.Type.Kind {
+	case TypeArray:
+		if idx < 0 || idx >= int64(len(root.Array)) {
+			interp.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", pos, "Use an index within array bounds.")
+			return false
+		}
+		child := root.Array[idx]
+		if !mutateValueAtIndexes(&child, indexes[1:], pos, interp, mutate) {
+			return false
+		}
+		root.Array[idx] = child
+		return true
+	case TypeString:
+		runes := []rune(root.String)
+		if idx < 0 || idx >= int64(len(runes)) {
+			interp.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", pos, "Use an index within string bounds.")
+			return false
+		}
+		child := Value{Type: Type{Kind: TypeString}, String: string(runes[idx])}
+		if !mutateValueAtIndexes(&child, indexes[1:], pos, interp, mutate) {
+			return false
+		}
+		childRunes := []rune(child.String)
+		if len(childRunes) != 1 {
+			interp.addRuntimeDiag("RUNTIME_TYPE", "String index assignment requires a single-character string.", pos, "Assign a string containing exactly one character.")
+			return false
+		}
+		runes[idx] = childRunes[0]
+		root.String = string(runes)
+		return true
+	default:
+		interp.addRuntimeDiag("RUNTIME_TYPE", "Indexed assignment target is not an array or string.", pos, "Use indexing only on arrays and strings.")
 		return false
 	}
-	child := root.Array[idx]
-	if !setValueAtIndexes(&child, indexes[1:], newValue, pos, interp) {
-		return false
-	}
-	root.Array[idx] = child
-	return true
 }
 
 func (i *interpreter) lookupVar(name string) (runtimeVar, int, bool) {

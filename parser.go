@@ -37,6 +37,8 @@ func (p *parser) parseStatement() Stmt {
 		return p.parseRead()
 	case TokenWrite:
 		return p.parseWrite()
+	case TokenPop:
+		return p.parsePop()
 	case TokenIf:
 		return p.parseIf()
 	case TokenWhile:
@@ -51,7 +53,7 @@ func (p *parser) parseStatement() Stmt {
 		return nil
 	default:
 		tok := p.peek()
-		p.addDiag("PARSE_UNEXPECTED_TOKEN", fmt.Sprintf("Unexpected token '%s'.", tok.Type.String()), tok.Pos, "Start a statement with var/const/read/write/if/while/for or an assignment.")
+		p.addDiag("PARSE_UNEXPECTED_TOKEN", fmt.Sprintf("Unexpected token '%s'.", tok.Type.String()), tok.Pos, "Start a statement with var/const/read/write/pop/if/while/for or an assignment.")
 		p.advance()
 		return nil
 	}
@@ -139,6 +141,15 @@ func (p *parser) parseWrite() Stmt {
 		values = append(values, p.parseExpression())
 	}
 	return &WriteStmt{Pos: kw.Pos, Values: values}
+}
+
+func (p *parser) parsePop() Stmt {
+	kw := p.advance()
+	target := p.parseAssignmentTarget()
+	if target == nil {
+		return nil
+	}
+	return &PopStmt{Pos: kw.Pos, Target: target}
 }
 
 func (p *parser) parseIf() Stmt {
@@ -252,7 +263,10 @@ func (p *parser) parseAssignment() Stmt {
 }
 
 func (p *parser) parseAssignmentTarget() Expr {
-	name := p.advance()
+	name, ok := p.consume(TokenIdentifier, "PARSE_EXPECTED_TOKEN", "Expected variable name.", "Use a variable or indexed target like name[0].")
+	if !ok {
+		return nil
+	}
 	var expr Expr = &IdentifierExpr{Pos: name.Pos, Name: name.Lexeme}
 	for p.match(TokenLBracket) {
 		idxExpr := p.parseExpression()
@@ -309,6 +323,11 @@ func (p *parser) parseFactor() Expr {
 }
 
 func (p *parser) parseUnary() Expr {
+	if p.match(TokenSize) {
+		op := p.previous()
+		value := p.parseUnary()
+		return &SizeExpr{Pos: op.Pos, Value: value}
+	}
 	if p.match(TokenMinus, TokenBang) {
 		op := p.previous()
 		right := p.parseUnary()
@@ -430,7 +449,7 @@ func (p *parser) synchronize() {
 	p.advance()
 	for !p.isAtEnd() {
 		switch p.peek().Type {
-		case TokenVar, TokenConst, TokenRead, TokenWrite, TokenIf, TokenWhile, TokenFor, TokenRBrace:
+		case TokenVar, TokenConst, TokenRead, TokenWrite, TokenPop, TokenIf, TokenWhile, TokenFor, TokenRBrace:
 			return
 		default:
 			p.advance()

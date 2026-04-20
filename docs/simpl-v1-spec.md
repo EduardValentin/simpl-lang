@@ -10,6 +10,7 @@
 - Constant declaration: `const name Type = Expr`
 - Assignment: `name = Expr`
 - Indexed assignment: `name[idx] = Expr` (supports nested indexes)
+- Sequence pop: `pop name` or `pop name[idx]`
 - Input: `read name`
 - Output: `write Expr (, Expr)*`
 - If / else-if / else
@@ -20,7 +21,8 @@
 ## Expressions
 - Literals: int, float, bool, string, array literal
 - Identifier
-- Indexing: `arr[idx]`
+- Sequence size: `size expr`
+- Indexing: `arr[idx]`, `str[idx]`
 - Unary: `-expr`, `!expr`
 - Binary:
   - Arithmetic: `+ - * / %`
@@ -43,6 +45,14 @@
 - Zero-indexed.
 - Index type must be `int`.
 - Out-of-range indexes are runtime errors.
+
+## String Sequence Rules
+- Strings remain type `string`.
+- Strings are zero-indexed by Unicode rune.
+- `str[idx]` returns a `string` containing exactly one rune.
+- Indexed string assignment requires the assigned value to contain exactly one rune.
+- `size str` returns the rune count.
+- `pop str` removes the last rune.
 
 ## Input/Output Rules
 - `read` consumes next whitespace token and parses to target variable type.

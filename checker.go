@@ -65,6 +65,18 @@ func (c *checker) checkStmt(stmt Stmt) {
 		for _, e := range s.Values {
 			c.checkExpr(e, nil)
 		}
+	case *PopStmt:
+		targetType := c.checkExpr(s.Target, nil)
+		if targetType.Kind == TypeInvalid {
+			return
+		}
+		if !c.isMutableTarget(s.Target) {
+			c.addDiag("TYPE_CONST_REASSIGN", "Cannot assign to constant target.", s.Target.Position(), "Use a mutable variable declared with 'var'.")
+			return
+		}
+		if targetType.Kind != TypeArray && targetType.Kind != TypeString {
+			c.addDiag("TYPE_INVALID_POP", "pop requires an array or string target.", s.Target.Position(), "Use pop only with mutable arrays and strings.")
+		}
 	case *IfStmt:
 		c.checkConditionBool(s.Primary.Condition)
 		c.checkStmt(s.Primary.Block)
@@ -154,6 +166,16 @@ func (c *checker) checkExpr(expr Expr, expected *Type) Type {
 			c.addDiag("TYPE_MISMATCH", "Unsupported unary operator.", e.Pos, "Use supported unary operators.")
 			return invalidType()
 		}
+	case *SizeExpr:
+		valueType := c.checkExpr(e.Value, nil)
+		if valueType.Kind == TypeInvalid {
+			return invalidType()
+		}
+		if valueType.Kind != TypeArray && valueType.Kind != TypeString {
+			c.addDiag("TYPE_INVALID_SIZE", "size requires an array or string expression.", e.Pos, "Use size only with arrays and strings.")
+			return invalidType()
+		}
+		return Type{Kind: TypeInt}
 	case *BinaryExpr:
 		left := c.checkExpr(e.Left, nil)
 		right := c.checkExpr(e.Right, nil)
@@ -246,15 +268,18 @@ func (c *checker) checkExpr(expr Expr, expected *Type) Type {
 		return Type{Kind: TypeArray, Elem: &elemType}
 	case *IndexExpr:
 		coll := c.checkExpr(e.Collection, nil)
-		if coll.Kind != TypeArray {
+		if coll.Kind != TypeArray && coll.Kind != TypeString {
 			if coll.Kind != TypeInvalid {
-				c.addDiag("TYPE_INVALID_INDEX", "Index operation requires an array target.", e.Pos, "Use indexing only on array values.")
+				c.addDiag("TYPE_INVALID_INDEX", "Index operation requires an array or string target.", e.Pos, "Use indexing only on arrays and strings.")
 			}
 			return invalidType()
 		}
 		idxType := c.checkExpr(e.Index, nil)
 		if idxType.Kind != TypeInt && idxType.Kind != TypeInvalid {
-			c.addDiag("TYPE_INVALID_INDEX", "Array index must be int.", e.Index.Position(), "Use an integer index.")
+			c.addDiag("TYPE_INVALID_INDEX", "Sequence index must be int.", e.Index.Position(), "Use an integer index.")
+		}
+		if coll.Kind == TypeString {
+			return Type{Kind: TypeString}
 		}
 		if coll.Elem == nil {
 			return invalidType()

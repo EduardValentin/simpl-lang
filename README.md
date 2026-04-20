@@ -77,6 +77,24 @@ matrix[1][0] = 7
 write matrix[1][0]
 ```
 
+### Sequence Primitives
+```simpl
+var name string = "abc"
+write size name
+write name[0]
+name[1] = "x"
+pop name
+
+var values array[int] = [1, 2, 3]
+write size values
+pop values
+```
+
+- `size expr` works on arrays and strings and returns `int`.
+- `pop target` removes the last element from a mutable array or string target.
+- Strings are indexed by Unicode rune and `name[i]` has type `string`.
+- String indexed assignment requires exactly one character on the right-hand side.
+
 ### Comments
 - Line comments only: `// ...`
 
@@ -181,7 +199,7 @@ See:
 ### Production dependency
 In `course-platform`:
 ```bash
-go get github.com/EduardValentin/simpl-lang@v0.2.0
+go get github.com/EduardValentin/simpl-lang@v0.3.0
 ```
 
 ### Local development override (optional)
@@ -198,10 +216,10 @@ go test ./...
 2. Commit and push `main`.
 3. Create and push a semver tag:
 ```bash
-git tag v0.2.0
-git push origin v0.2.0
+git tag v0.3.0
+git push origin v0.3.0
 ```
-4. Update consuming app (`course-platform`) with `go get ...@v0.2.0`.
+4. Update consuming app (`course-platform`) with `go get ...@v0.3.0`.
 
 ## Development
 Run all tests:

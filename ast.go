@@ -51,6 +51,14 @@ type WriteStmt struct {
 func (s *WriteStmt) stmtNode()          {}
 func (s *WriteStmt) Position() Position { return s.Pos }
 
+type PopStmt struct {
+	Pos    Position
+	Target Expr // IdentifierExpr or IndexExpr
+}
+
+func (s *PopStmt) stmtNode()          {}
+func (s *PopStmt) Position() Position { return s.Pos }
+
 type IfClause struct {
 	Pos       Position
 	Condition Expr
@@ -120,6 +128,14 @@ type UnaryExpr struct {
 
 func (e *UnaryExpr) exprNode()          {}
 func (e *UnaryExpr) Position() Position { return e.Pos }
+
+type SizeExpr struct {
+	Pos   Position
+	Value Expr
+}
+
+func (e *SizeExpr) exprNode()          {}
+func (e *SizeExpr) Position() Position { return e.Pos }
 
 type BinaryExpr struct {
 	Pos      Position

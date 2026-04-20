@@ -27,10 +27,16 @@ func TestCLICheckAndRun(t *testing.T) {
 	tmp := t.TempDir()
 	srcPath := filepath.Join(tmp, "prog.simpl")
 	stdinPath := filepath.Join(tmp, "in.txt")
-	if err := os.WriteFile(srcPath, []byte("var x int\nread x\nwrite x"), 0o600); err != nil {
+	source := `var s string = "abc"
+var a array[int] = [1,2,3]
+write size s, "-", s[1], "|"
+pop s
+pop a
+write s, "|", size a`
+	if err := os.WriteFile(srcPath, []byte(source), 0o600); err != nil {
 		t.Fatalf("write source file: %v", err)
 	}
-	if err := os.WriteFile(stdinPath, []byte("123"), 0o600); err != nil {
+	if err := os.WriteFile(stdinPath, []byte("unused"), 0o600); err != nil {
 		t.Fatalf("write stdin file: %v", err)
 	}
 
@@ -50,7 +56,7 @@ func TestCLICheckAndRun(t *testing.T) {
 	if err != nil {
 		t.Fatalf("run command failed: %v\nOutput:\n%s", err, string(runOut))
 	}
-	if strings.TrimSpace(string(runOut)) != "123" {
+	if strings.TrimSpace(string(runOut)) != "3-b|ab|2" {
 		t.Fatalf("unexpected run output: %q", string(runOut))
 	}
 }
