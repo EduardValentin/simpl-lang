@@ -22,7 +22,7 @@ CLI:
 - `cmd/simpl/main.go`
 - Commands:
   - `simpl check <file> [--json]`
-  - `simpl run <file> [--stdin <file>] [--max-steps N] [--timeout-ms N] [--json]`
+  - `simpl run <file> [--stdin <file>] [--max-steps N] [--max-output-bytes N] [--timeout-ms N] [--json]`
 
 ## Language Semantics (V1)
 - Arrays are **0-indexed**.
@@ -57,6 +57,8 @@ These defaults are overrideable via `RunOptions` or CLI flags.
 - `OnDiagnostic(d Diagnostic)`
 
 Use these for live console/event streaming integrations (for example SSE/WebSocket in `course-platform`).
+
+Hosts can also set `Context` for cancellation and `MaxOutputBytes` for bounded stdout allocation.
 
 ## Tests
 Main tests live at repository root:

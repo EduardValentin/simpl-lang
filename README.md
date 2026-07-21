@@ -111,6 +111,9 @@ pop values
 Defaults (overridable via `RunOptions`):
 - Timeout: `2s`
 - Max steps: `1_000_000`
+- Max output bytes: unlimited when set to `0`; positive values enforce a byte limit; negative values are invalid
+
+`RunOptions.Context` stops execution when its context is canceled. Cancellation returns stdout already emitted, suppresses later callbacks and limit diagnostics, and remains observable through `Context.Err()`. Callback panics are trusted host failures and propagate to the caller.
 
 ## Go API
 
@@ -143,17 +146,24 @@ write x`
 package example
 
 import (
+    "context"
     "fmt"
     simpl "github.com/EduardValentin/simpl-lang"
 )
 
 func main() {
     source := `for i from 0 until 5 step 1 { write i, " " }`
+    ctx, cancel := context.WithCancel(context.Background())
 
     result := simpl.Run(source, "", simpl.RunOptions{
+        Context:        ctx,
+        MaxOutputBytes: 64 * 1024,
         OnStdoutChunk: func(chunk string, stepsUsed int64) {
             // Send chunk to SSE/WebSocket client
             fmt.Printf("chunk=%q steps=%d\n", chunk, stepsUsed)
+            if chunk == "2" {
+                cancel()
+            }
         },
         OnDiagnostic: func(d simpl.Diagnostic) {
             // Forward runtime/limit diagnostic event
@@ -161,7 +171,7 @@ func main() {
         },
     })
 
-    _ = result
+    fmt.Printf("stdout=%q canceled=%v\n", result.Stdout, ctx.Err())
 }
 ```
 
@@ -172,7 +182,7 @@ func main() {
 go run ./cmd/simpl check path/to/file.simpl
 
 # Execute source
-go run ./cmd/simpl run path/to/file.simpl --stdin path/to/input.txt
+go run ./cmd/simpl run path/to/file.simpl --stdin path/to/input.txt --max-output-bytes 65536
 
 # JSON mode
 go run ./cmd/simpl check path/to/file.simpl --json

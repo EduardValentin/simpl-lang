@@ -72,8 +72,9 @@
 Default limits:
 - Max steps: `1_000_000`
 - Timeout: `2 seconds`
+- Max output bytes: unlimited at `0`; positive values enforce a byte limit; negative values are invalid
 
-Limits are configurable through `RunOptions`.
+Limits and context cancellation are configurable through `RunOptions`. Output limits are measured in bytes and never return partial UTF-8 code points.
 
 ## Comments
 - Only line comments are supported: `// ...`

@@ -1,6 +1,7 @@
 package simpl
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -11,30 +12,41 @@ type runtimeVar struct {
 	mutable bool
 }
 
+type evaluationValueMode uint8
+
+const (
+	copyEvaluationValues evaluationValueMode = iota
+	borrowEvaluationValues
+)
+
 type interpreter struct {
-	scopes     []map[string]runtimeVar
-	diags      []Diagnostic
-	stdout     strings.Builder
-	input      []string
-	inputIndex int
-	steps      int64
-	maxSteps   int64
-	deadline   time.Time
-	timedOut   bool
-	halted     bool
-	onStdout   func(chunk string, stepsUsed int64)
-	onDiag     func(d Diagnostic)
+	scopes         []map[string]runtimeVar
+	diags          []Diagnostic
+	stdout         strings.Builder
+	input          []string
+	inputIndex     int
+	steps          int64
+	maxSteps       int64
+	maxOutputBytes int
+	deadline       time.Time
+	ctx            context.Context
+	timedOut       bool
+	halted         bool
+	onStdout       func(chunk string, stepsUsed int64)
+	onDiag         func(d Diagnostic)
 }
 
 func newInterpreter(stdin string, opts RunOptions) *interpreter {
 	return &interpreter{
-		scopes:   make([]map[string]runtimeVar, 0, 8),
-		diags:    make([]Diagnostic, 0, 8),
-		input:    strings.Fields(stdin),
-		maxSteps: opts.MaxSteps,
-		deadline: time.Now().Add(opts.Timeout),
-		onStdout: opts.OnStdoutChunk,
-		onDiag:   opts.OnDiagnostic,
+		scopes:         make([]map[string]runtimeVar, 0, 8),
+		diags:          make([]Diagnostic, 0, 8),
+		input:          strings.Fields(stdin),
+		maxSteps:       opts.MaxSteps,
+		maxOutputBytes: opts.MaxOutputBytes,
+		deadline:       time.Now().Add(opts.Timeout),
+		ctx:            opts.Context,
+		onStdout:       opts.OnStdoutChunk,
+		onDiag:         opts.OnDiagnostic,
 	}
 }
 
@@ -85,14 +97,21 @@ func (i *interpreter) execStmt(stmt Stmt) {
 		i.execRead(s)
 	case *WriteStmt:
 		for _, expr := range s.Values {
-			v, ok := i.evalExpr(expr)
+			if i.contextCanceled() {
+				i.halted = true
+				return
+			}
+			v, ok := i.evalOutputExpr(expr)
 			if !ok {
 				return
 			}
-			chunk := valueToString(v)
-			i.stdout.WriteString(chunk)
-			if i.onStdout != nil {
-				i.onStdout(chunk, i.steps)
+			if i.contextCanceled() {
+				i.halted = true
+				return
+			}
+			i.writeValue(v, expr.Position())
+			if i.halted {
+				return
 			}
 		}
 	case *PushStmt:
@@ -289,6 +308,19 @@ func (i *interpreter) evalCondition(expr Expr) bool {
 }
 
 func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
+	return i.evalExprWithMode(expr, copyEvaluationValues)
+}
+
+func (i *interpreter) evalOutputExpr(expr Expr) (Value, bool) {
+	return i.evalExprWithMode(expr, borrowEvaluationValues)
+}
+
+func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Value, bool) {
+	if i.contextCanceled() {
+		i.halted = true
+		return Value{}, false
+	}
+
 	switch e := expr.(type) {
 	case *LiteralExpr:
 		switch v := e.Value.(type) {
@@ -310,9 +342,9 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 			i.addRuntimeDiag("RUNTIME_UNDECLARED", fmt.Sprintf("Variable '%s' is not declared.", e.Name), e.Pos, "Declare it before use.")
 			return Value{}, false
 		}
-		return cloneValue(v.value), true
+		return evaluationValue(v.value, mode), true
 	case *UnaryExpr:
-		right, ok := i.evalExpr(e.Right)
+		right, ok := i.evalExprWithMode(e.Right, mode)
 		if !ok {
 			return Value{}, false
 		}
@@ -337,7 +369,7 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 			return Value{}, false
 		}
 	case *SizeExpr:
-		value, ok := i.evalExpr(e.Value)
+		value, ok := i.evalExprWithMode(e.Value, mode)
 		if !ok {
 			return Value{}, false
 		}
@@ -351,22 +383,22 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 			return Value{}, false
 		}
 	case *BinaryExpr:
-		left, ok := i.evalExpr(e.Left)
+		left, ok := i.evalExprWithMode(e.Left, mode)
 		if !ok {
 			return Value{}, false
 		}
-		right, ok := i.evalExpr(e.Right)
+		right, ok := i.evalExprWithMode(e.Right, mode)
 		if !ok {
 			return Value{}, false
 		}
 		return i.evalBinary(e, left, right)
 	case *GroupExpr:
-		return i.evalExpr(e.Inner)
+		return i.evalExprWithMode(e.Inner, mode)
 	case *ArrayLiteralExpr:
 		arr := make([]Value, len(e.Elements))
 		var elemType *Type
 		for idx := range e.Elements {
-			v, ok := i.evalExpr(e.Elements[idx])
+			v, ok := i.evalExprWithMode(e.Elements[idx], mode)
 			if !ok {
 				return Value{}, false
 			}
@@ -377,7 +409,7 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 				i.addRuntimeDiag("RUNTIME_TYPE", "Array literal contains mixed element types.", e.Elements[idx].Position(), "Use homogeneous array element types.")
 				return Value{}, false
 			}
-			arr[idx] = cloneValue(v)
+			arr[idx] = evaluationValue(v, mode)
 		}
 		if elemType == nil {
 			unknown := invalidType()
@@ -385,11 +417,11 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 		}
 		return Value{Type: Type{Kind: TypeArray, Elem: elemType}, Array: arr}, true
 	case *IndexExpr:
-		collection, ok := i.evalExpr(e.Collection)
+		collection, ok := i.evalExprWithMode(e.Collection, mode)
 		if !ok {
 			return Value{}, false
 		}
-		idxValue, ok := i.evalExpr(e.Index)
+		idxValue, ok := i.evalExprWithMode(e.Index, mode)
 		if !ok {
 			return Value{}, false
 		}
@@ -403,7 +435,7 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within array bounds.")
 				return Value{}, false
 			}
-			return cloneValue(collection.Array[idxValue.Int]), true
+			return evaluationValue(collection.Array[idxValue.Int], mode), true
 		case TypeString:
 			runes := stringRunes(collection)
 			if idxValue.Int < 0 || idxValue.Int >= int64(len(runes)) {
@@ -419,6 +451,13 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 		i.addRuntimeDiag("RUNTIME_TYPE", "Unsupported expression node.", expr.Position(), "Use a supported expression form.")
 		return Value{}, false
 	}
+}
+
+func evaluationValue(value Value, mode evaluationValueMode) Value {
+	if mode == borrowEvaluationValues {
+		return value
+	}
+	return cloneValue(value)
 }
 
 func (i *interpreter) evalBinary(expr *BinaryExpr, left, right Value) (Value, bool) {
@@ -503,11 +542,21 @@ func (i *interpreter) evalBinary(expr *BinaryExpr, left, right Value) (Value, bo
 		}
 	case TokenEqual:
 		if left.Type.Equals(right.Type) {
-			return Value{Type: Type{Kind: TypeBool}, Bool: valuesEqual(left, right)}, true
+			equal, canceled := valuesEqualWithCancel(left, right, i.contextCanceled)
+			if canceled {
+				i.halted = true
+				return Value{}, false
+			}
+			return Value{Type: Type{Kind: TypeBool}, Bool: equal}, true
 		}
 	case TokenNotEqual:
 		if left.Type.Equals(right.Type) {
-			return Value{Type: Type{Kind: TypeBool}, Bool: !valuesEqual(left, right)}, true
+			equal, canceled := valuesEqualWithCancel(left, right, i.contextCanceled)
+			if canceled {
+				i.halted = true
+				return Value{}, false
+			}
+			return Value{Type: Type{Kind: TypeBool}, Bool: !equal}, true
 		}
 	}
 	i.addRuntimeDiag("RUNTIME_TYPE", "Invalid operand types for operator.", expr.Pos, "Use matching operand types for this operator.")
@@ -772,24 +821,20 @@ func (i *interpreter) tick(pos Position) bool {
 	if i.halted {
 		return false
 	}
+	if i.contextCanceled() {
+		i.halted = true
+		return false
+	}
 	if !i.deadline.IsZero() && time.Now().After(i.deadline) {
 		i.timedOut = true
 		i.halted = true
-		d := newDiagnostic("LIMIT_TIMEOUT", "limit", "Execution timed out.", pos, "Optimize the loop or increase timeout for this exercise.")
-		i.diags = append(i.diags, d)
-		if i.onDiag != nil {
-			i.onDiag(d)
-		}
+		i.emitDiagnostic(newDiagnostic("LIMIT_TIMEOUT", "limit", "Execution timed out.", pos, "Optimize the loop or increase timeout for this exercise."))
 		return false
 	}
 	i.steps++
 	if i.maxSteps > 0 && i.steps > i.maxSteps {
 		i.halted = true
-		d := newDiagnostic("LIMIT_STEPS_EXCEEDED", "limit", "Execution step limit exceeded.", pos, "Check for infinite loops or reduce algorithm steps.")
-		i.diags = append(i.diags, d)
-		if i.onDiag != nil {
-			i.onDiag(d)
-		}
+		i.emitDiagnostic(newDiagnostic("LIMIT_STEPS_EXCEEDED", "limit", "Execution step limit exceeded.", pos, "Check for infinite loops or reduce algorithm steps."))
 		return false
 	}
 	return true
@@ -797,9 +842,56 @@ func (i *interpreter) tick(pos Position) bool {
 
 func (i *interpreter) addRuntimeDiag(code, message string, pos Position, hint string) {
 	i.halted = true
-	d := newDiagnostic(code, "runtime", message, pos, hint)
+	i.emitDiagnostic(newDiagnostic(code, "runtime", message, pos, hint))
+}
+
+func (i *interpreter) writeValue(value Value, pos Position) {
+	var chunk string
+	exceeded := false
+	canceled := false
+	if i.maxOutputBytes > 0 {
+		remaining := i.maxOutputBytes - i.stdout.Len()
+		if remaining < 0 {
+			remaining = 0
+		}
+		chunk, exceeded, canceled = valueToStringWithinBytes(value, remaining, i.contextCanceled)
+	} else {
+		chunk, _, canceled = formatValue(value, 0, false, i.contextCanceled)
+	}
+	if canceled || i.contextCanceled() {
+		i.halted = true
+		return
+	}
+
+	i.stdout.WriteString(chunk)
+	if i.onStdout != nil && (!exceeded || chunk != "") {
+		i.onStdout(chunk, i.steps)
+	}
+	if i.contextCanceled() {
+		i.halted = true
+		return
+	}
+	if !exceeded {
+		return
+	}
+
+	i.halted = true
+	i.emitDiagnostic(newDiagnostic(
+		"LIMIT_OUTPUT_EXCEEDED",
+		"limit",
+		"Execution output limit exceeded.",
+		pos,
+		"Reduce the amount of output produced by the program.",
+	))
+}
+
+func (i *interpreter) emitDiagnostic(d Diagnostic) {
 	i.diags = append(i.diags, d)
 	if i.onDiag != nil {
 		i.onDiag(d)
 	}
+}
+
+func (i *interpreter) contextCanceled() bool {
+	return i.ctx != nil && i.ctx.Err() != nil
 }

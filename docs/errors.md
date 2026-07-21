@@ -44,3 +44,5 @@ Every diagnostic includes:
 ## Limit Errors
 - `LIMIT_STEPS_EXCEEDED`: Instruction step budget exhausted.
 - `LIMIT_TIMEOUT`: Wall-clock timeout exceeded.
+- `LIMIT_OUTPUT_EXCEEDED`: Configured stdout byte budget exhausted.
+- `LIMIT_INVALID_OUTPUT_LIMIT`: Configured stdout byte budget is negative.

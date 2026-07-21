@@ -1,6 +1,7 @@
 package simpl
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -13,8 +14,10 @@ const (
 
 // RunOptions configures runtime safety limits.
 type RunOptions struct {
-	MaxSteps int64
-	Timeout  time.Duration
+	Context        context.Context
+	MaxSteps       int64
+	MaxOutputBytes int
+	Timeout        time.Duration
 
 	// OnStdoutChunk is called whenever write emits text during execution.
 	OnStdoutChunk func(chunk string, stepsUsed int64)
@@ -39,7 +42,20 @@ func Validate(source string) []Diagnostic {
 // Run lexes/parses/type-checks and executes source.
 func Run(source string, stdin string, opts RunOptions) RunResult {
 	opts = normalizeOptions(opts)
+	if opts.Context != nil && opts.Context.Err() != nil {
+		return RunResult{}
+	}
+	if diagnostic := runOptionsDiagnostic(opts); diagnostic != nil {
+		if opts.OnDiagnostic != nil {
+			opts.OnDiagnostic(*diagnostic)
+		}
+		return RunResult{Diagnostics: []Diagnostic{*diagnostic}}
+	}
+
 	prog, diags := compileSource(source)
+	if opts.Context != nil && opts.Context.Err() != nil {
+		return RunResult{}
+	}
 	if len(diags) > 0 {
 		return RunResult{Diagnostics: diags}
 	}
@@ -73,6 +89,21 @@ func normalizeOptions(opts RunOptions) RunOptions {
 		opts.Timeout = defaultTimeout
 	}
 	return opts
+}
+
+func runOptionsDiagnostic(opts RunOptions) *Diagnostic {
+	if opts.MaxOutputBytes >= 0 {
+		return nil
+	}
+
+	diagnostic := newDiagnostic(
+		"LIMIT_INVALID_OUTPUT_LIMIT",
+		"limit",
+		"Output byte limit cannot be negative.",
+		Position{Line: 1, Column: 1},
+		"Use zero for unlimited output or a positive byte limit.",
+	)
+	return &diagnostic
 }
 
 func compileSource(source string) (*Program, []Diagnostic) {

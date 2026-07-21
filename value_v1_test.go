@@ -44,3 +44,26 @@ func TestCloneValuePreservesSequenceCapacity(t *testing.T) {
 		t.Fatalf("expected cloned string capacity 8, got %d", cap(clonedString.Runes))
 	}
 }
+
+func TestValuesEqualStopsDuringNestedTraversal(t *testing.T) {
+	elementType := Type{Kind: TypeInt}
+	arrayType := Type{Kind: TypeArray, Elem: &elementType}
+	values := make([]Value, 1_000)
+	for index := range values {
+		values[index] = Value{Type: elementType, Int: int64(index)}
+	}
+	checks := 0
+
+	equal, canceled := valuesEqualWithCancel(
+		Value{Type: arrayType, Array: values},
+		Value{Type: arrayType, Array: values},
+		func() bool {
+			checks++
+			return checks == 100
+		},
+	)
+
+	if equal || !canceled {
+		t.Fatalf("expected canceled equality traversal, got equal=%t canceled=%t", equal, canceled)
+	}
+}

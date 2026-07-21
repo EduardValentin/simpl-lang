@@ -1,6 +1,7 @@
 package simpl
 
 import (
+	"encoding/json"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -59,5 +60,36 @@ write s, "|", size s, "|", a, "|", size a`
 	}
 	if strings.TrimSpace(string(runOut)) != "abcd|4|[1, 2, 3, 4]|4" {
 		t.Fatalf("unexpected run output: %q", string(runOut))
+	}
+
+	limitedCmd := exec.Command("go", "run", "./cmd/simpl", "run", srcPath, "--max-output-bytes", "5", "--json")
+	limitedCmd.Dir = "."
+	limitedOut, err := limitedCmd.Output()
+	if err == nil {
+		t.Fatal("expected output-limited command to return a non-zero status")
+	}
+	var limitedResult RunResult
+	if err := json.Unmarshal(limitedOut, &limitedResult); err != nil {
+		t.Fatalf("decode limited result: %v\nOutput:\n%s", err, string(limitedOut))
+	}
+	if limitedResult.Stdout != "abcd|" {
+		t.Fatalf("unexpected limited stdout: %q", limitedResult.Stdout)
+	}
+	if len(limitedResult.Diagnostics) != 1 || limitedResult.Diagnostics[0].Code != "LIMIT_OUTPUT_EXCEEDED" {
+		t.Fatalf("unexpected limited diagnostics: %+v", limitedResult.Diagnostics)
+	}
+
+	invalidLimitCmd := exec.Command("go", "run", "./cmd/simpl", "run", srcPath, "--max-output-bytes", "-1", "--json")
+	invalidLimitCmd.Dir = "."
+	invalidLimitOut, err := invalidLimitCmd.Output()
+	if err == nil {
+		t.Fatal("expected invalid output limit command to return a non-zero status")
+	}
+	var invalidLimitResult RunResult
+	if err := json.Unmarshal(invalidLimitOut, &invalidLimitResult); err != nil {
+		t.Fatalf("decode invalid limit result: %v\nOutput:\n%s", err, string(invalidLimitOut))
+	}
+	if len(invalidLimitResult.Diagnostics) != 1 || invalidLimitResult.Diagnostics[0].Code != "LIMIT_INVALID_OUTPUT_LIMIT" {
+		t.Fatalf("unexpected invalid limit diagnostics: %+v", invalidLimitResult.Diagnostics)
 	}
 }

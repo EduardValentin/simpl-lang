@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 type Value struct {
@@ -53,55 +54,127 @@ func cloneValue(v Value) Value {
 	return out
 }
 
-func valueToString(v Value) string {
-	switch v.Type.Kind {
+type valueFormatter struct {
+	builder      strings.Builder
+	remaining    int
+	bounded      bool
+	truncated    bool
+	canceled     bool
+	shouldCancel func() bool
+}
+
+func valueToStringWithinBytes(value Value, maxBytes int, shouldCancel func() bool) (string, bool, bool) {
+	return formatValue(value, maxBytes, true, shouldCancel)
+}
+
+func formatValue(value Value, maxBytes int, bounded bool, shouldCancel func() bool) (string, bool, bool) {
+	formatter := valueFormatter{
+		remaining:    maxBytes,
+		bounded:      bounded,
+		shouldCancel: shouldCancel,
+	}
+	formatter.writeValue(value)
+	return formatter.builder.String(), formatter.truncated, formatter.canceled
+}
+
+func (f *valueFormatter) writeValue(value Value) {
+	if f.done() {
+		return
+	}
+
+	switch value.Type.Kind {
 	case TypeInt:
-		return strconv.FormatInt(v.Int, 10)
+		f.writeString(strconv.FormatInt(value.Int, 10))
 	case TypeFloat:
-		return strconv.FormatFloat(v.Float, 'f', -1, 64)
+		f.writeString(strconv.FormatFloat(value.Float, 'f', -1, 64))
 	case TypeBool:
-		if v.Bool {
-			return "true"
+		if value.Bool {
+			f.writeString("true")
+			return
 		}
-		return "false"
+		f.writeString("false")
 	case TypeString:
-		return v.String
+		f.writeString(value.String)
 	case TypeArray:
-		parts := make([]string, len(v.Array))
-		for i := range v.Array {
-			parts[i] = valueToString(v.Array[i])
+		f.writeString("[")
+		for index := range value.Array {
+			if f.done() {
+				return
+			}
+			if index > 0 {
+				f.writeString(", ")
+			}
+			f.writeValue(value.Array[index])
 		}
-		return "[" + strings.Join(parts, ", ") + "]"
+		f.writeString("]")
 	default:
-		return "<invalid>"
+		f.writeString("<invalid>")
 	}
 }
 
-func valuesEqual(a, b Value) bool {
+func (f *valueFormatter) writeString(value string) {
+	if f.done() || value == "" {
+		return
+	}
+	if !f.bounded {
+		f.builder.WriteString(value)
+		return
+	}
+	if len(value) <= f.remaining {
+		f.builder.WriteString(value)
+		f.remaining -= len(value)
+		return
+	}
+
+	prefix := value[:f.remaining]
+	for !utf8.ValidString(prefix) {
+		prefix = prefix[:len(prefix)-1]
+	}
+	f.builder.WriteString(prefix)
+	f.remaining -= len(prefix)
+	f.truncated = true
+}
+
+func (f *valueFormatter) done() bool {
+	if f.truncated || f.canceled {
+		return true
+	}
+	if f.shouldCancel != nil && f.shouldCancel() {
+		f.canceled = true
+		return true
+	}
+	return false
+}
+
+func valuesEqualWithCancel(a, b Value, shouldCancel func() bool) (bool, bool) {
+	if shouldCancel != nil && shouldCancel() {
+		return false, true
+	}
 	if !a.Type.Equals(b.Type) {
-		return false
+		return false, false
 	}
 	switch a.Type.Kind {
 	case TypeInt:
-		return a.Int == b.Int
+		return a.Int == b.Int, false
 	case TypeFloat:
-		return a.Float == b.Float
+		return a.Float == b.Float, false
 	case TypeBool:
-		return a.Bool == b.Bool
+		return a.Bool == b.Bool, false
 	case TypeString:
-		return a.String == b.String
+		return a.String == b.String, false
 	case TypeArray:
 		if len(a.Array) != len(b.Array) {
-			return false
+			return false, false
 		}
 		for i := range a.Array {
-			if !valuesEqual(a.Array[i], b.Array[i]) {
-				return false
+			equal, canceled := valuesEqualWithCancel(a.Array[i], b.Array[i], shouldCancel)
+			if canceled || !equal {
+				return false, canceled
 			}
 		}
-		return true
+		return true, false
 	default:
-		return false
+		return false, false
 	}
 }
 
