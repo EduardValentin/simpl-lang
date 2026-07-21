@@ -14,10 +14,16 @@ const (
 
 // RunOptions configures runtime safety limits.
 type RunOptions struct {
-	Context        context.Context
-	MaxSteps       int64
-	MaxOutputBytes int
-	Timeout        time.Duration
+	Context  context.Context
+	MaxSteps int64
+	// MaxValueAllocationBytes limits cumulative semantic value allocations, not the whole Go heap.
+	// It excludes source loading and compilation, stdin tokenization, source-shaped index traversal
+	// slices, scope maps and stacks, diagnostics, allocator overhead, and trusted host callbacks.
+	// Index traversal storage is bounded by parsed source shape; Course hosts must bound source and
+	// host input independently. Zero is unlimited; negative values are invalid.
+	MaxValueAllocationBytes int64
+	MaxOutputBytes          int
+	Timeout                 time.Duration
 
 	// OnStdoutChunk is called whenever write emits text during execution.
 	OnStdoutChunk func(chunk string, stepsUsed int64)
@@ -92,18 +98,27 @@ func normalizeOptions(opts RunOptions) RunOptions {
 }
 
 func runOptionsDiagnostic(opts RunOptions) *Diagnostic {
-	if opts.MaxOutputBytes >= 0 {
-		return nil
+	if opts.MaxValueAllocationBytes < 0 {
+		diagnostic := newDiagnostic(
+			"LIMIT_INVALID_VALUE_ALLOCATION_LIMIT",
+			"limit",
+			"Value allocation byte limit cannot be negative.",
+			Position{Line: 1, Column: 1},
+			"Use zero for unlimited value allocations or a positive byte limit.",
+		)
+		return &diagnostic
 	}
-
-	diagnostic := newDiagnostic(
-		"LIMIT_INVALID_OUTPUT_LIMIT",
-		"limit",
-		"Output byte limit cannot be negative.",
-		Position{Line: 1, Column: 1},
-		"Use zero for unlimited output or a positive byte limit.",
-	)
-	return &diagnostic
+	if opts.MaxOutputBytes < 0 {
+		diagnostic := newDiagnostic(
+			"LIMIT_INVALID_OUTPUT_LIMIT",
+			"limit",
+			"Output byte limit cannot be negative.",
+			Position{Line: 1, Column: 1},
+			"Use zero for unlimited output or a positive byte limit.",
+		)
+		return &diagnostic
+	}
+	return nil
 }
 
 func compileSource(source string) (*Program, []Diagnostic) {

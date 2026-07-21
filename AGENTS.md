@@ -22,7 +22,7 @@ CLI:
 - `cmd/simpl/main.go`
 - Commands:
   - `simpl check <file> [--json]`
-  - `simpl run <file> [--stdin <file>] [--max-steps N] [--max-output-bytes N] [--timeout-ms N] [--json]`
+  - `simpl run <file> [--stdin <file>] [--max-steps N] [--max-value-allocation-bytes N] [--max-output-bytes N] [--timeout-ms N] [--json]`
 
 ## Language Semantics (V1)
 - Arrays are **0-indexed**.
@@ -51,6 +51,8 @@ Defined in `main.go`:
 
 These defaults are overrideable via `RunOptions` or CLI flags.
 
+Hosts executing untrusted programs should set positive `MaxValueAllocationBytes` and `MaxOutputBytes` limits. Value allocation accounting is cumulative per run and includes string/array backing storage, runtime array type metadata, growth replacements, concatenation, recursive clones, and quoted string input decoding; zero remains unlimited for backward compatibility.
+
 ## Runtime Streaming Hooks
 `RunOptions` also supports optional callbacks used by host platforms:
 - `OnStdoutChunk(chunk string, stepsUsed int64)`
@@ -58,7 +60,7 @@ These defaults are overrideable via `RunOptions` or CLI flags.
 
 Use these for live console/event streaming integrations (for example SSE/WebSocket in `course-platform`).
 
-Hosts can also set `Context` for cancellation and `MaxOutputBytes` for bounded stdout allocation.
+Hosts can also set `Context` for cancellation, `MaxValueAllocationBytes` for bounded runtime value allocation, and `MaxOutputBytes` for bounded stdout allocation.
 
 ## Tests
 Main tests live at repository root:

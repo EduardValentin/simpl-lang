@@ -92,4 +92,18 @@ write s, "|", size s, "|", a, "|", size a`
 	if len(invalidLimitResult.Diagnostics) != 1 || invalidLimitResult.Diagnostics[0].Code != "LIMIT_INVALID_OUTPUT_LIMIT" {
 		t.Fatalf("unexpected invalid limit diagnostics: %+v", invalidLimitResult.Diagnostics)
 	}
+
+	valueLimitedCmd := exec.Command("go", "run", "./cmd/simpl", "run", srcPath, "--max-value-allocation-bytes", "1", "--json")
+	valueLimitedCmd.Dir = "."
+	valueLimitedOut, err := valueLimitedCmd.Output()
+	if err == nil {
+		t.Fatal("expected value-allocation-limited command to return a non-zero status")
+	}
+	var valueLimitedResult RunResult
+	if err := json.Unmarshal(valueLimitedOut, &valueLimitedResult); err != nil {
+		t.Fatalf("decode value-allocation-limited result: %v\nOutput:\n%s", err, string(valueLimitedOut))
+	}
+	if len(valueLimitedResult.Diagnostics) != 1 || valueLimitedResult.Diagnostics[0].Code != "LIMIT_VALUE_ALLOCATION_EXCEEDED" {
+		t.Fatalf("unexpected value allocation diagnostics: %+v", valueLimitedResult.Diagnostics)
+	}
 }

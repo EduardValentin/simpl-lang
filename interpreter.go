@@ -20,33 +20,36 @@ const (
 )
 
 type interpreter struct {
-	scopes         []map[string]runtimeVar
-	diags          []Diagnostic
-	stdout         strings.Builder
-	input          []string
-	inputIndex     int
-	steps          int64
-	maxSteps       int64
-	maxOutputBytes int
-	deadline       time.Time
-	ctx            context.Context
-	timedOut       bool
-	halted         bool
-	onStdout       func(chunk string, stepsUsed int64)
-	onDiag         func(d Diagnostic)
+	scopes                  []map[string]runtimeVar
+	diags                   []Diagnostic
+	stdout                  strings.Builder
+	input                   []string
+	inputIndex              int
+	steps                   int64
+	maxSteps                int64
+	valueAllocationBytes    int64
+	maxValueAllocationBytes int64
+	maxOutputBytes          int
+	deadline                time.Time
+	ctx                     context.Context
+	timedOut                bool
+	halted                  bool
+	onStdout                func(chunk string, stepsUsed int64)
+	onDiag                  func(d Diagnostic)
 }
 
 func newInterpreter(stdin string, opts RunOptions) *interpreter {
 	return &interpreter{
-		scopes:         make([]map[string]runtimeVar, 0, 8),
-		diags:          make([]Diagnostic, 0, 8),
-		input:          strings.Fields(stdin),
-		maxSteps:       opts.MaxSteps,
-		maxOutputBytes: opts.MaxOutputBytes,
-		deadline:       time.Now().Add(opts.Timeout),
-		ctx:            opts.Context,
-		onStdout:       opts.OnStdoutChunk,
-		onDiag:         opts.OnDiagnostic,
+		scopes:                  make([]map[string]runtimeVar, 0, 8),
+		diags:                   make([]Diagnostic, 0, 8),
+		input:                   strings.Fields(stdin),
+		maxSteps:                opts.MaxSteps,
+		maxValueAllocationBytes: opts.MaxValueAllocationBytes,
+		maxOutputBytes:          opts.MaxOutputBytes,
+		deadline:                time.Now().Add(opts.Timeout),
+		ctx:                     opts.Context,
+		onStdout:                opts.OnStdoutChunk,
+		onDiag:                  opts.OnDiagnostic,
 	}
 }
 
@@ -84,7 +87,10 @@ func (i *interpreter) execStmt(stmt Stmt) {
 			if !ok {
 				return
 			}
-			val = cloneValue(evaluated)
+			val, ok = i.cloneValue(evaluated, s.Initializer.Position())
+			if !ok {
+				return
+			}
 		}
 		i.scopes[len(i.scopes)-1][s.Name] = runtimeVar{value: val, mutable: !s.Const}
 	case *AssignStmt:
@@ -220,7 +226,10 @@ func (i *interpreter) execRead(stmt *ReadStmt) {
 	}
 	token := i.input[i.inputIndex]
 	i.inputIndex++
-	parsed, err := parseInputToken(token, v.value.Type)
+	parsed, err, ok := i.parseRuntimeInputToken(token, v.value.Type, stmt.Pos)
+	if !ok {
+		return
+	}
 	if err != nil {
 		i.addRuntimeDiag("RUNTIME_READ_PARSE", fmt.Sprintf("Input token '%s' cannot be parsed as %s.", token, v.value.Type.String()), stmt.Pos, "Ensure input tokens match variable types.")
 		return
@@ -250,7 +259,10 @@ func (i *interpreter) execPop(stmt *PopStmt) {
 		return
 	}
 
-	mutable := cloneValue(root.value)
+	mutable, ok := i.cloneValue(root.value, stmt.Pos)
+	if !ok {
+		return
+	}
 	if !mutateValueAtIndexes(&mutable, indexes, stmt.Pos, i, func(target *Value) bool {
 		return popValue(target, stmt.Pos, i)
 	}) {
@@ -281,9 +293,12 @@ func (i *interpreter) execPush(stmt *PushStmt) {
 		return
 	}
 
-	mutable := cloneValue(root.value)
+	mutable, ok := i.cloneValue(root.value, stmt.Pos)
+	if !ok {
+		return
+	}
 	if !mutateValueAtIndexes(&mutable, indexes, stmt.Pos, i, func(target *Value) bool {
-		values, ok := i.evalPushValues(target.Type, stmt.Values)
+		values, ok := i.evalPushValues(target.Type, stmt.Values, stmt.Pos)
 		if !ok {
 			return false
 		}
@@ -331,7 +346,7 @@ func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Val
 		case bool:
 			return Value{Type: Type{Kind: TypeBool}, Bool: v}, true
 		case string:
-			return newStringValue(v), true
+			return i.newRuntimeStringValue(Type{Kind: TypeString}, v, e.Pos)
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "Invalid literal value.", e.Pos, "Use supported literal types.")
 			return Value{}, false
@@ -342,7 +357,7 @@ func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Val
 			i.addRuntimeDiag("RUNTIME_UNDECLARED", fmt.Sprintf("Variable '%s' is not declared.", e.Name), e.Pos, "Declare it before use.")
 			return Value{}, false
 		}
-		return evaluationValue(v.value, mode), true
+		return i.evaluationValue(v.value, mode, e.Pos)
 	case *UnaryExpr:
 		right, ok := i.evalExprWithMode(e.Right, mode)
 		if !ok {
@@ -377,7 +392,11 @@ func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Val
 		case TypeArray:
 			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(value.Array))}, true
 		case TypeString:
-			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(stringRunes(value)))}, true
+			runes, ok := i.valueRunes(value, e.Pos)
+			if !ok {
+				return Value{}, false
+			}
+			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(runes))}, true
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "size requires an array or string value.", e.Pos, "Use size only on arrays and strings.")
 			return Value{}, false
@@ -395,7 +414,10 @@ func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Val
 	case *GroupExpr:
 		return i.evalExprWithMode(e.Inner, mode)
 	case *ArrayLiteralExpr:
-		arr := make([]Value, len(e.Elements))
+		arr, ok := i.makeRuntimeValueSlice(len(e.Elements), len(e.Elements), e.Pos)
+		if !ok {
+			return Value{}, false
+		}
 		var elemType *Type
 		for idx := range e.Elements {
 			v, ok := i.evalExprWithMode(e.Elements[idx], mode)
@@ -403,17 +425,24 @@ func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Val
 				return Value{}, false
 			}
 			if elemType == nil {
-				t := v.Type
-				elemType = &t
+				elemType, ok = i.copyRuntimeType(v.Type, e.Elements[idx].Position())
+				if !ok {
+					return Value{}, false
+				}
 			} else if !v.Type.Equals(*elemType) {
 				i.addRuntimeDiag("RUNTIME_TYPE", "Array literal contains mixed element types.", e.Elements[idx].Position(), "Use homogeneous array element types.")
 				return Value{}, false
 			}
-			arr[idx] = evaluationValue(v, mode)
+			arr[idx], ok = i.evaluationValue(v, mode, e.Elements[idx].Position())
+			if !ok {
+				return Value{}, false
+			}
 		}
 		if elemType == nil {
-			unknown := invalidType()
-			elemType = &unknown
+			elemType, ok = i.copyRuntimeType(invalidType(), e.Pos)
+			if !ok {
+				return Value{}, false
+			}
 		}
 		return Value{Type: Type{Kind: TypeArray, Elem: elemType}, Array: arr}, true
 	case *IndexExpr:
@@ -435,14 +464,17 @@ func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Val
 				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within array bounds.")
 				return Value{}, false
 			}
-			return evaluationValue(collection.Array[idxValue.Int], mode), true
+			return i.evaluationValue(collection.Array[idxValue.Int], mode, e.Pos)
 		case TypeString:
-			runes := stringRunes(collection)
+			runes, ok := i.valueRunes(collection, e.Pos)
+			if !ok {
+				return Value{}, false
+			}
 			if idxValue.Int < 0 || idxValue.Int >= int64(len(runes)) {
 				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within string bounds.")
 				return Value{}, false
 			}
-			return newStringValueFromRunes(Type{Kind: TypeString}, []rune{runes[idxValue.Int]}), true
+			return i.newRuntimeSingleRuneString(Type{Kind: TypeString}, runes[idxValue.Int], e.Pos)
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "Index target is not an array or string.", e.Pos, "Use indexing only on arrays and strings.")
 			return Value{}, false
@@ -453,21 +485,18 @@ func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Val
 	}
 }
 
-func evaluationValue(value Value, mode evaluationValueMode) Value {
+func (i *interpreter) evaluationValue(value Value, mode evaluationValueMode, pos Position) (Value, bool) {
 	if mode == borrowEvaluationValues {
-		return value
+		return value, true
 	}
-	return cloneValue(value)
+	return i.cloneValue(value, pos)
 }
 
 func (i *interpreter) evalBinary(expr *BinaryExpr, left, right Value) (Value, bool) {
 	switch expr.Operator {
 	case TokenPlus:
 		if left.Type.Kind == TypeString && right.Type.Kind == TypeString {
-			combined := make([]rune, 0, len(stringRunes(left))+len(stringRunes(right)))
-			combined = append(combined, stringRunes(left)...)
-			combined = append(combined, stringRunes(right)...)
-			return newStringValueFromRunes(Type{Kind: TypeString}, combined), true
+			return i.concatenateRuntimeStrings(left, right, expr.Pos)
 		}
 		if left.Type.Kind == TypeInt && right.Type.Kind == TypeInt {
 			return Value{Type: Type{Kind: TypeInt}, Int: left.Int + right.Int}, true
@@ -579,7 +608,11 @@ func (i *interpreter) assignTarget(target Expr, value Value) {
 			i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot assign %s to %s.", value.Type.String(), cur.value.Type.String()), t.Pos, "Assign values with matching types.")
 			return
 		}
-		cur.value = cloneValue(value)
+		cloned, ok := i.cloneValue(value, t.Pos)
+		if !ok {
+			return
+		}
+		cur.value = cloned
 		i.scopes[scopeIdx][t.Name] = cur
 	case *IndexExpr:
 		i.assignIndexedTarget(t, value)
@@ -610,7 +643,10 @@ func (i *interpreter) assignIndexedTarget(expr *IndexExpr, value Value) {
 		return
 	}
 
-	mutable := cloneValue(root.value)
+	mutable, ok := i.cloneValue(root.value, expr.Pos)
+	if !ok {
+		return
+	}
 	if !mutateValueAtIndexes(&mutable, indexes, expr.Pos, i, func(target *Value) bool {
 		return assignValue(target, value, expr.Pos, i)
 	}) {
@@ -657,7 +693,11 @@ func assignValue(target *Value, newValue Value, pos Position, interp *interprete
 		interp.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot assign %s to %s.", newValue.Type.String(), target.Type.String()), pos, "Assign values with matching element type.")
 		return false
 	}
-	*target = cloneValue(newValue)
+	cloned, ok := interp.cloneValue(newValue, pos)
+	if !ok {
+		return false
+	}
+	*target = cloned
 	return true
 }
 
@@ -671,22 +711,27 @@ func popValue(target *Value, pos Position, interp *interpreter) bool {
 		target.Array = target.Array[:len(target.Array)-1]
 		return true
 	case TypeString:
-		runes := stringRunes(*target)
+		runes, ok := interp.valueRunes(*target, pos)
+		if !ok {
+			return false
+		}
 		if len(runes) == 0 {
 			interp.addRuntimeDiag("RUNTIME_POP_EMPTY", "Cannot pop from an empty string.", pos, "Ensure the string has at least one character before popping.")
 			return false
 		}
 		target.Runes = runes[:len(runes)-1]
-		target.String = string(target.Runes)
-		return true
+		return interp.refreshRuntimeString(target, pos)
 	default:
 		interp.addRuntimeDiag("RUNTIME_TYPE", "pop requires an array or string target.", pos, "Use pop only on arrays and strings.")
 		return false
 	}
 }
 
-func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bool) {
-	values := make([]Value, 0, len(exprs))
+func (i *interpreter) evalPushValues(targetType Type, exprs []Expr, pos Position) ([]Value, bool) {
+	values, ok := i.makeRuntimeValueSlice(0, len(exprs), pos)
+	if !ok {
+		return nil, false
+	}
 	switch targetType.Kind {
 	case TypeArray:
 		if targetType.Elem == nil {
@@ -702,7 +747,11 @@ func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bo
 				i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot push %s into array of %s.", value.Type.String(), targetType.Elem.String()), expr.Position(), "Push values with the array element type.")
 				return nil, false
 			}
-			values = append(values, cloneValue(value))
+			cloned, ok := i.cloneValue(value, expr.Position())
+			if !ok {
+				return nil, false
+			}
+			values = append(values, cloned)
 		}
 	case TypeString:
 		for _, expr := range exprs {
@@ -714,11 +763,19 @@ func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bo
 				i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot push %s into string target.", value.Type.String()), expr.Position(), "Push string values into strings.")
 				return nil, false
 			}
-			if len(stringRunes(value)) != 1 {
+			runes, ok := i.valueRunes(value, expr.Position())
+			if !ok {
+				return nil, false
+			}
+			if len(runes) != 1 {
 				i.addRuntimeDiag("RUNTIME_TYPE", "String push requires a single-character string.", expr.Position(), "Push a string containing exactly one character.")
 				return nil, false
 			}
-			values = append(values, cloneValue(value))
+			cloned, ok := i.cloneValue(value, expr.Position())
+			if !ok {
+				return nil, false
+			}
+			values = append(values, cloned)
 		}
 	default:
 		i.addRuntimeDiag("RUNTIME_TYPE", "push requires an array or string target.", exprs[0].Position(), "Use push only on arrays and strings.")
@@ -730,16 +787,33 @@ func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bo
 func pushValues(target *Value, values []Value, pos Position, interp *interpreter) bool {
 	switch target.Type.Kind {
 	case TypeArray:
-		target.Array = growValueSlice(target.Array, len(values))
+		grown, ok := interp.growRuntimeValueSlice(target.Array, len(values), pos)
+		if !ok {
+			return false
+		}
+		target.Array = grown
 		for _, value := range values {
-			target.Array = append(target.Array, cloneValue(value))
+			cloned, ok := interp.cloneValue(value, pos)
+			if !ok {
+				return false
+			}
+			target.Array = append(target.Array, cloned)
 		}
 		return true
 	case TypeString:
-		runes := stringRunes(*target)
-		runes = growRuneSlice(runes, len(values))
+		runes, ok := interp.valueRunes(*target, pos)
+		if !ok {
+			return false
+		}
+		runes, ok = interp.growRuntimeRuneSlice(runes, len(values), pos)
+		if !ok {
+			return false
+		}
 		for _, value := range values {
-			valueRunes := stringRunes(value)
+			valueRunes, ok := interp.valueRunes(value, pos)
+			if !ok {
+				return false
+			}
 			if len(valueRunes) != 1 {
 				interp.addRuntimeDiag("RUNTIME_TYPE", "String push requires a single-character string.", pos, "Push a string containing exactly one character.")
 				return false
@@ -747,8 +821,7 @@ func pushValues(target *Value, values []Value, pos Position, interp *interpreter
 			runes = append(runes, valueRunes[0])
 		}
 		target.Runes = runes
-		target.String = string(runes)
-		return true
+		return interp.refreshRuntimeString(target, pos)
 	default:
 		interp.addRuntimeDiag("RUNTIME_TYPE", "push requires an array or string target.", pos, "Use push only on arrays and strings.")
 		return false
@@ -773,24 +846,32 @@ func mutateValueAtIndexes(root *Value, indexes []int64, pos Position, interp *in
 		root.Array[idx] = child
 		return true
 	case TypeString:
-		runes := stringRunes(*root)
+		runes, ok := interp.valueRunes(*root, pos)
+		if !ok {
+			return false
+		}
 		if idx < 0 || idx >= int64(len(runes)) {
 			interp.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", pos, "Use an index within string bounds.")
 			return false
 		}
-		child := newStringValueFromRunes(Type{Kind: TypeString}, []rune{runes[idx]})
+		child, ok := interp.newRuntimeSingleRuneString(Type{Kind: TypeString}, runes[idx], pos)
+		if !ok {
+			return false
+		}
 		if !mutateValueAtIndexes(&child, indexes[1:], pos, interp, mutate) {
 			return false
 		}
-		childRunes := stringRunes(child)
+		childRunes, ok := interp.valueRunes(child, pos)
+		if !ok {
+			return false
+		}
 		if len(childRunes) != 1 {
 			interp.addRuntimeDiag("RUNTIME_TYPE", "String index assignment requires a single-character string.", pos, "Assign a string containing exactly one character.")
 			return false
 		}
 		runes[idx] = childRunes[0]
 		root.Runes = runes
-		root.String = string(runes)
-		return true
+		return interp.refreshRuntimeString(root, pos)
 	default:
 		interp.addRuntimeDiag("RUNTIME_TYPE", "Indexed assignment target is not an array or string.", pos, "Use indexing only on arrays and strings.")
 		return false
@@ -815,6 +896,46 @@ func (i *interpreter) popScope() {
 		return
 	}
 	i.scopes = i.scopes[:len(i.scopes)-1]
+}
+
+func (i *interpreter) reserveValueAllocation(bytes int64, valid bool, pos Position) bool {
+	if i.contextCanceled() {
+		i.halted = true
+		return false
+	}
+	if i.halted {
+		return false
+	}
+
+	nextValueBytes, totalValid := checkedAllocationByteSum(i.valueAllocationBytes, bytes)
+	if !valid || !totalValid || i.maxValueAllocationBytes < 0 {
+		i.rejectValueAllocation(pos)
+		return false
+	}
+	if i.maxValueAllocationBytes > 0 && nextValueBytes > i.maxValueAllocationBytes {
+		i.rejectValueAllocation(pos)
+		return false
+	}
+	i.valueAllocationBytes = nextValueBytes
+	return true
+}
+
+func (i *interpreter) rejectValueAllocation(pos Position) {
+	if i.contextCanceled() {
+		i.halted = true
+		return
+	}
+	if i.halted {
+		return
+	}
+	i.halted = true
+	i.emitDiagnostic(newDiagnostic(
+		"LIMIT_VALUE_ALLOCATION_EXCEEDED",
+		"limit",
+		"Execution value allocation limit exceeded.",
+		pos,
+		"Reduce runtime string or array growth, or increase the value allocation byte limit.",
+	))
 }
 
 func (i *interpreter) tick(pos Position) bool {

@@ -8,7 +8,7 @@ Go module path: `github.com/EduardValentin/simpl-lang`
 ## What this package provides
 - Embeddable Go runtime API for validating and executing Simpl source code.
 - Structured diagnostics for lexer/parser/type/runtime/limit errors.
-- Runtime safety limits (time + steps).
+- Runtime safety limits (time, steps, value allocations, and output).
 - Optional runtime callbacks for live output/diagnostic streaming.
 - CLI for local checks and execution.
 
@@ -111,7 +111,10 @@ pop values
 Defaults (overridable via `RunOptions`):
 - Timeout: `2s`
 - Max steps: `1_000_000`
+- Max value allocation bytes: unlimited when set to `0`; positive values enforce a cumulative runtime value allocation budget; negative values are invalid
 - Max output bytes: unlimited when set to `0`; positive values enforce a byte limit; negative values are invalid
+
+`MaxValueAllocationBytes` charges requested backing storage and array type metadata before runtime strings, arrays, sequence growth, concatenation, and recursive value clones allocate. The budget also conservatively charges quoted string input decoding, transient allocations, and full replacement capacity during growth, and is not refunded when values are released. It excludes source loading and compiler allocations, stdin tokenization, source-shaped index traversal slices, scope maps and stacks, diagnostics, allocator overhead, and trusted host callbacks. Index traversal storage is bounded by parsed source shape; Course hosts bound source and host input independently. This is a semantic value allocation budget, not an exact whole-Go-heap limit. Exhaustion or allocation-size overflow emits `LIMIT_VALUE_ALLOCATION_EXCEEDED`.
 
 `RunOptions.Context` stops execution when its context is canceled. Cancellation returns stdout already emitted, suppresses later callbacks and limit diagnostics, and remains observable through `Context.Err()`. Callback panics are trusted host failures and propagate to the caller.
 
@@ -156,8 +159,9 @@ func main() {
     ctx, cancel := context.WithCancel(context.Background())
 
     result := simpl.Run(source, "", simpl.RunOptions{
-        Context:        ctx,
-        MaxOutputBytes: 64 * 1024,
+        Context:                  ctx,
+        MaxValueAllocationBytes: 8 * 1024 * 1024,
+        MaxOutputBytes:          64 * 1024,
         OnStdoutChunk: func(chunk string, stepsUsed int64) {
             // Send chunk to SSE/WebSocket client
             fmt.Printf("chunk=%q steps=%d\n", chunk, stepsUsed)
@@ -182,7 +186,7 @@ func main() {
 go run ./cmd/simpl check path/to/file.simpl
 
 # Execute source
-go run ./cmd/simpl run path/to/file.simpl --stdin path/to/input.txt --max-output-bytes 65536
+go run ./cmd/simpl run path/to/file.simpl --stdin path/to/input.txt --max-value-allocation-bytes 8388608 --max-output-bytes 65536
 
 # JSON mode
 go run ./cmd/simpl check path/to/file.simpl --json
@@ -204,6 +208,7 @@ Examples:
 - `RUNTIME_READ_PARSE`
 - `LIMIT_STEPS_EXCEEDED`
 - `LIMIT_TIMEOUT`
+- `LIMIT_VALUE_ALLOCATION_EXCEEDED`
 
 See:
 - `docs/simpl-v1-spec.md`

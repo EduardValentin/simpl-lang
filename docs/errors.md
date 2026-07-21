@@ -44,5 +44,7 @@ Every diagnostic includes:
 ## Limit Errors
 - `LIMIT_STEPS_EXCEEDED`: Instruction step budget exhausted.
 - `LIMIT_TIMEOUT`: Wall-clock timeout exceeded.
+- `LIMIT_VALUE_ALLOCATION_EXCEEDED`: Runtime value allocation budget exhausted or allocation sizing overflowed.
+- `LIMIT_INVALID_VALUE_ALLOCATION_LIMIT`: Configured runtime value allocation byte budget is negative.
 - `LIMIT_OUTPUT_EXCEEDED`: Configured stdout byte budget exhausted.
 - `LIMIT_INVALID_OUTPUT_LIMIT`: Configured stdout byte budget is negative.

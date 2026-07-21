@@ -72,9 +72,10 @@
 Default limits:
 - Max steps: `1_000_000`
 - Timeout: `2 seconds`
+- Max value allocation bytes: unlimited at `0`; positive values enforce a cumulative runtime value allocation budget; negative values are invalid
 - Max output bytes: unlimited at `0`; positive values enforce a byte limit; negative values are invalid
 
-Limits and context cancellation are configurable through `RunOptions`. Output limits are measured in bytes and never return partial UTF-8 code points.
+Limits and context cancellation are configurable through `RunOptions`. `MaxValueAllocationBytes` charges requested string and array backing storage plus runtime array type metadata before allocation, including sequence growth, concatenation, recursive clones, quoted string input decoding, and transient replacement storage. Charges are cumulative for the run and are not refunded. The budget excludes source loading and compiler allocations, stdin tokenization, source-shaped index traversal slices, scope maps and stacks, diagnostics, allocator overhead, and trusted host callbacks. Index traversal storage is bounded by parsed source shape; Course hosts bound source and host input independently. This is a semantic value allocation budget, not an exact whole-Go-heap limit. Allocation-size overflow fails with `LIMIT_VALUE_ALLOCATION_EXCEEDED` even when the configured budget is unlimited. Output limits are measured separately in bytes and never return partial UTF-8 code points.
 
 ## Comments
 - Only line comments are supported: `// ...`
