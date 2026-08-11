@@ -97,6 +97,9 @@ func (c *checker) checkStmt(stmt Stmt) {
 		}
 	case *WriteStmt:
 		for _, e := range s.Values {
+			if c.depthReported {
+				break
+			}
 			c.checkExpr(e, nil)
 		}
 	case *PopStmt:
@@ -127,6 +130,9 @@ func (c *checker) checkStmt(stmt Stmt) {
 				return
 			}
 			for _, valueExpr := range s.Values {
+				if c.depthReported {
+					break
+				}
 				got := c.checkExpr(valueExpr, targetType.Elem)
 				if got.Kind != TypeInvalid && !got.Equals(*targetType.Elem) {
 					c.addDiag("TYPE_MISMATCH", fmt.Sprintf("Cannot push %s into array of %s.", got.String(), targetType.Elem.String()), valueExpr.Position(), "Push values with the array element type.")
@@ -135,6 +141,9 @@ func (c *checker) checkStmt(stmt Stmt) {
 		case TypeString:
 			expected := Type{Kind: TypeString}
 			for _, valueExpr := range s.Values {
+				if c.depthReported {
+					break
+				}
 				got := c.checkExpr(valueExpr, &expected)
 				if got.Kind != TypeInvalid && !got.Equals(expected) {
 					c.addDiag("TYPE_MISMATCH", fmt.Sprintf("Cannot push %s into string target.", got.String()), valueExpr.Position(), "Push string values into strings.")
@@ -255,7 +264,10 @@ func (c *checker) checkExpr(expr Expr, expected *Type) Type {
 		return Type{Kind: TypeInt}
 	case *BinaryExpr:
 		left := c.checkExpr(e.Left, nil)
-		right := c.checkExpr(e.Right, nil)
+		right := invalidType()
+		if !c.depthReported {
+			right = c.checkExpr(e.Right, nil)
+		}
 		if left.Kind == TypeInvalid || right.Kind == TypeInvalid {
 			return invalidType()
 		}

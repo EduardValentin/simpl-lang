@@ -239,6 +239,51 @@ func TestDepthLimit_InterpreterRejectsDeepASTEvenWithoutParserInvolved(t *testin
 	assertSingleMaxDepthDiagnostic(t, result.Diagnostics)
 }
 
+// --- Documented accumulation-guarantee tests -----------------------------
+//
+// See the "Diagnostic accumulation guarantee" comment in limits.go: once
+// LIMIT_MAX_DEPTH_EXCEEDED has been reported for a program, no further
+// diagnostics are guaranteed, even for structurally unrelated errors in
+// sibling nodes. These tests pin that documented, narrower-than-usual
+// contract down so a future change to the suppression logic changes it on
+// purpose, not by accident.
+
+func TestDepthLimit_UnrelatedErrorsStillAccumulateWithoutDepthExcess(t *testing.T) {
+	// Baseline: with no depth excess involved, the checker's normal
+	// contract holds — every independent error is reported.
+	diags := Validate("write undeclaredX, undeclaredY")
+	if len(diags) != 2 {
+		t.Fatalf("expected 2 independent diagnostics, got %d: %+v", len(diags), diags)
+	}
+	for _, d := range diags {
+		if d.Code != "TYPE_UNDECLARED_IDENTIFIER" {
+			t.Fatalf("expected TYPE_UNDECLARED_IDENTIFIER, got %s", d.Code)
+		}
+	}
+}
+
+func TestDepthLimit_SuppressesUnrelatedSiblingErrorsOnceReported(t *testing.T) {
+	// Once the depth limit fires on one WriteStmt value, an unrelated,
+	// independent error in a sibling value (an undeclared identifier)
+	// is NOT also reported. This is the documented, narrower
+	// accumulation guarantee for this specific diagnostic — verified
+	// here so it can't silently regress into either direction: neither
+	// a diagnostic cascade nor an accidental restoration that some
+	// future change assumes is guaranteed elsewhere.
+	src := "write " + strings.Repeat("(", nestingOverBudget) + "1" + strings.Repeat(")", nestingOverBudget) + ", undeclaredVarB"
+
+	diags := Validate(src)
+
+	assertSingleMaxDepthDiagnostic(t, diags)
+
+	// Sanity check: the identifier really would be reported on its own,
+	// so its absence above is the suppression, not some unrelated typo.
+	aloneDiags := Validate("write undeclaredVarB")
+	if len(aloneDiags) != 1 || aloneDiags[0].Code != "TYPE_UNDECLARED_IDENTIFIER" {
+		t.Fatalf("expected the identifier alone to produce TYPE_UNDECLARED_IDENTIFIER, got %+v", aloneDiags)
+	}
+}
+
 // deeplyNestedIndexExpr builds `name[0][0]...[0]` as an AST, n index
 // brackets deep, without going through the parser.
 func deeplyNestedIndexExpr(name string, n int) Expr {

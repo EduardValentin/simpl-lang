@@ -33,6 +33,18 @@ func zeroValue(t Type) Value {
 	}
 }
 
+// cloneValue recurses through Array to deep-copy nested array values, with
+// no depth guard of its own. That is safe today, but only structurally:
+// a Value's array nesting can never be deeper than the Type it was built
+// from (every array Value is produced from a TypeArray whose Elem chain
+// mirrors it), and every Type reaching this function already passed
+// through the parser's parseType/checker's checkExpr guards, which cap
+// type/array-literal nesting at maxNestingDepth (see limits.go). So this
+// recursion is bounded transitively, not by anything enforced here. If a
+// future change ever lets a Value's array nesting diverge from its Type's
+// nesting — e.g. a mutation path that appends without going through the
+// checked/parsed type — that invariant would break silently and this
+// recursion would no longer be bounded.
 func cloneValue(v Value) Value {
 	out := v
 	switch v.Type.Kind {
@@ -53,6 +65,11 @@ func cloneValue(v Value) Value {
 	return out
 }
 
+// valueToString recurses through Array the same way cloneValue does, and
+// relies on the same structural invariant (see cloneValue's doc comment):
+// array-value nesting cannot exceed the already-capped type/array-literal
+// nesting, so this has no depth guard of its own but is bounded
+// transitively rather than by anything enforced here.
 func valueToString(v Value) string {
 	switch v.Type.Kind {
 	case TypeInt:
@@ -77,6 +94,11 @@ func valueToString(v Value) string {
 	}
 }
 
+// valuesEqual recurses through Array the same way cloneValue does, and
+// relies on the same structural invariant (see cloneValue's doc comment):
+// array-value nesting cannot exceed the already-capped type/array-literal
+// nesting, so this has no depth guard of its own but is bounded
+// transitively rather than by anything enforced here.
 func valuesEqual(a, b Value) bool {
 	if !a.Type.Equals(b.Type) {
 		return false

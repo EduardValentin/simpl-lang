@@ -37,3 +37,25 @@ const (
 	maxDepthMessage  = "Source is nested too deeply to process."
 	maxDepthHint     = "Reduce parenthesis, unary-operator, array, index, type, or block nesting."
 )
+
+// Diagnostic accumulation guarantee once the depth limit fires:
+//
+// Elsewhere, the checker's contract is to keep walking and report every
+// independent error it finds (see AGENTS.md's diagnostics contract), and
+// the parser/interpreter follow the same spirit within their own stages.
+// The depth-limit guard breaks that contract on purpose, once it fires:
+// each stage's depthReported/halted flag makes every sibling and
+// subsequent node a fast no-op rather than walking it for its own,
+// unrelated errors. That is deliberate — the alternative (suppressing
+// only within the subtree that actually exceeded the limit, so unrelated
+// siblings keep accumulating diagnostics normally) is a materially larger
+// change than the problem is worth, given how the limit can only be
+// reached by nesting a program more than maxNestingDepth levels deep.
+//
+// So the actual guarantee is narrower than elsewhere in this codebase:
+// once a LIMIT_MAX_DEPTH_EXCEEDED diagnostic has been reported for a
+// program, no further diagnostics are guaranteed to be reported for that
+// same program, even for errors that are structurally unrelated to the
+// excess nesting (for example, an undeclared identifier in a sibling
+// `write` value next to a 1000-level-deep parenthesized expression).
+// Do not assume full accumulation still holds past that point.
