@@ -6,6 +6,39 @@ type parser struct {
 	tokens []Token
 	idx    int
 	diags  []Diagnostic
+
+	// depth tracks how many levels of nested structure (parens,
+	// unary/size prefix chains, array literal elements, index
+	// expressions, array types, or blocks) are currently open on the
+	// Go call stack. depthReported is set once the limit has been
+	// exceeded so only one diagnostic is emitted and later nested
+	// attempts fail fast instead of recursing further.
+	depth         int
+	depthReported bool
+}
+
+// beginDepth records entry into one level of nested structure. It returns
+// false once maxNestingDepth is exceeded (or was already exceeded
+// elsewhere), in which case the caller must not recurse further and should
+// substitute a placeholder instead. Every call, regardless of its return
+// value, must be paired with exactly one endDepth call so depth stays
+// accurate on every exit path, including error paths and early returns.
+func (p *parser) beginDepth(pos Position) bool {
+	p.depth++
+	if p.depthReported {
+		return false
+	}
+	if p.depth > maxNestingDepth {
+		p.depthReported = true
+		p.diags = append(p.diags, newDiagnostic(maxDepthCode, maxDepthCategory, maxDepthMessage, pos, maxDepthHint))
+		return false
+	}
+	return true
+}
+
+// endDepth closes exactly one beginDepth call.
+func (p *parser) endDepth() {
+	p.depth--
 }
 
 func parseProgram(tokens []Token) (*Program, []Diagnostic) {
@@ -15,7 +48,7 @@ func parseProgram(tokens []Token) (*Program, []Diagnostic) {
 	}
 
 	prog := &Program{Statements: make([]Stmt, 0, 32)}
-	for !p.isAtEnd() {
+	for !p.isAtEnd() && !p.depthReported {
 		stmt := p.parseStatement()
 		if stmt != nil {
 			prog.Statements = append(prog.Statements, stmt)
@@ -108,11 +141,19 @@ func (p *parser) parseType() (Type, bool) {
 		p.advance()
 		return Type{Kind: TypeString}, true
 	case TokenTypeArray:
+		arrTok := tok
 		p.advance()
 		if _, ok := p.consume(TokenLBracket, "PARSE_EXPECTED_TOKEN", "Expected '[' after array type.", "Use array[int], array[string], etc."); !ok {
 			return invalidType(), false
 		}
-		elem, ok := p.parseType()
+		var elem Type
+		var ok bool
+		if p.beginDepth(arrTok.Pos) {
+			elem, ok = p.parseType()
+		} else {
+			elem, ok = invalidType(), false
+		}
+		p.endDepth()
 		if !ok {
 			return invalidType(), false
 		}
@@ -248,12 +289,18 @@ func (p *parser) parseFor() Stmt {
 }
 
 func (p *parser) parseBlock() *BlockStmt {
+	entered := p.beginDepth(p.peek().Pos)
+	defer p.endDepth()
+	if !entered {
+		return nil
+	}
+
 	open, ok := p.consume(TokenLBrace, "PARSE_EXPECTED_TOKEN", "Expected '{' to start block.", "Use braces around block statements.")
 	if !ok {
 		return nil
 	}
 	b := &BlockStmt{Pos: open.Pos, Statements: make([]Stmt, 0, 8)}
-	for !p.check(TokenRBrace) && !p.isAtEnd() {
+	for !p.check(TokenRBrace) && !p.isAtEnd() && !p.depthReported {
 		stmt := p.parseStatement()
 		if stmt != nil {
 			b.Statements = append(b.Statements, stmt)
@@ -288,7 +335,14 @@ func (p *parser) parseAssignmentTarget() Expr {
 	}
 	var expr Expr = &IdentifierExpr{Pos: name.Pos, Name: name.Lexeme}
 	for p.match(TokenLBracket) {
-		idxExpr := p.parseExpression()
+		open := p.previous()
+		var idxExpr Expr
+		if p.beginDepth(open.Pos) {
+			idxExpr = p.parseExpression()
+		} else {
+			idxExpr = &LiteralExpr{Pos: open.Pos, Value: nil}
+		}
+		p.endDepth()
 		if _, ok := p.consume(TokenRBracket, "PARSE_EXPECTED_TOKEN", "Expected closing ']' in index expression.", "Close index expression with ']'."); !ok {
 			return nil
 		}
@@ -344,12 +398,24 @@ func (p *parser) parseFactor() Expr {
 func (p *parser) parseUnary() Expr {
 	if p.match(TokenSize) {
 		op := p.previous()
-		value := p.parseUnary()
+		var value Expr
+		if p.beginDepth(op.Pos) {
+			value = p.parseUnary()
+		} else {
+			value = &LiteralExpr{Pos: op.Pos, Value: nil}
+		}
+		p.endDepth()
 		return &SizeExpr{Pos: op.Pos, Value: value}
 	}
 	if p.match(TokenMinus, TokenBang) {
 		op := p.previous()
-		right := p.parseUnary()
+		var right Expr
+		if p.beginDepth(op.Pos) {
+			right = p.parseUnary()
+		} else {
+			right = &LiteralExpr{Pos: op.Pos, Value: nil}
+		}
+		p.endDepth()
 		return &UnaryExpr{Pos: op.Pos, Operator: op.Type, Right: right}
 	}
 	return p.parsePostfix()
@@ -358,7 +424,14 @@ func (p *parser) parseUnary() Expr {
 func (p *parser) parsePostfix() Expr {
 	expr := p.parsePrimary()
 	for p.match(TokenLBracket) {
-		idx := p.parseExpression()
+		open := p.previous()
+		var idx Expr
+		if p.beginDepth(open.Pos) {
+			idx = p.parseExpression()
+		} else {
+			idx = &LiteralExpr{Pos: open.Pos, Value: nil}
+		}
+		p.endDepth()
 		if _, ok := p.consume(TokenRBracket, "PARSE_EXPECTED_TOKEN", "Expected closing ']' in index expression.", "Close index expression with ']'."); !ok {
 			return expr
 		}
@@ -378,7 +451,13 @@ func (p *parser) parsePrimary() Expr {
 		return &IdentifierExpr{Pos: tok.Pos, Name: tok.Lexeme}
 	case TokenLParen:
 		open := p.advance()
-		expr := p.parseExpression()
+		var expr Expr
+		if p.beginDepth(open.Pos) {
+			expr = p.parseExpression()
+		} else {
+			expr = &LiteralExpr{Pos: open.Pos, Value: nil}
+		}
+		p.endDepth()
 		if _, ok := p.consume(TokenRParen, "PARSE_EXPECTED_TOKEN", "Expected ')' after expression.", "Close grouped expression with ')'."); !ok {
 			return expr
 		}
@@ -400,7 +479,14 @@ func (p *parser) parseArrayLiteral() Expr {
 	}
 
 	for {
-		elements = append(elements, p.parseExpression())
+		var el Expr
+		if p.beginDepth(open.Pos) {
+			el = p.parseExpression()
+		} else {
+			el = &LiteralExpr{Pos: open.Pos, Value: nil}
+		}
+		p.endDepth()
+		elements = append(elements, el)
 		if p.match(TokenComma) {
 			continue
 		}
@@ -458,6 +544,15 @@ func (p *parser) consume(tt TokenType, code, message, hint string) (Token, bool)
 }
 
 func (p *parser) addDiag(code, message string, pos Position, hint string) {
+	// Once the nesting-depth limit has fired, the recursive-descent
+	// unwind that follows (many ancestor frames each failing to find
+	// their own matching closing token because parsing stopped early)
+	// would otherwise cascade into hundreds or thousands of redundant
+	// "expected token" diagnostics for the very same rejected source.
+	// The source is already rejected; suppress the noise.
+	if p.depthReported {
+		return
+	}
 	p.diags = append(p.diags, newDiagnostic(code, "parser", message, pos, hint))
 }
 

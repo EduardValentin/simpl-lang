@@ -44,3 +44,15 @@ Every diagnostic includes:
 ## Limit Errors
 - `LIMIT_STEPS_EXCEEDED`: Instruction step budget exhausted.
 - `LIMIT_TIMEOUT`: Wall-clock timeout exceeded.
+- `LIMIT_MAX_DEPTH_EXCEEDED`: Source nested too deeply (parentheses, unary/size prefix chains, array literals, indexing, array types, or blocks). Raised by whichever of the parser, checker, or interpreter first walks past the shared nesting-depth limit.
+
+  **Accumulation guarantee is narrower here than elsewhere.** Everywhere
+  else, the checker in particular keeps walking after an error and reports
+  every independent issue it finds. Once `LIMIT_MAX_DEPTH_EXCEEDED` has
+  been reported for a program, that guarantee no longer holds: no further
+  diagnostics are guaranteed to be reported for that same program, even
+  for errors structurally unrelated to the excess nesting (for example, an
+  undeclared identifier next to a 1000-level-deep parenthesized
+  expression in the same `write` statement). Treat
+  `LIMIT_MAX_DEPTH_EXCEEDED` as reporting only that one problem, not as a
+  complete list of everything wrong with the program.

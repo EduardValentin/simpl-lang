@@ -51,6 +51,16 @@ Defined in `main.go`:
 
 These defaults are overrideable via `RunOptions` or CLI flags.
 
+Defined in `limits.go`:
+- Nesting depth: `1000` levels, shared by the parser, checker, and
+  interpreter (parens, unary/`size` prefix chains, array literals,
+  indexing, array types, blocks). Not configurable — it exists purely to
+  keep pathologically nested source from exhausting the host process's
+  call stack (a fatal, unrecoverable Go runtime error, not a panic).
+  Exceeding it produces a `LIMIT_MAX_DEPTH_EXCEEDED` diagnostic. Once
+  that diagnostic has been reported, further diagnostic accumulation for
+  the same program is not guaranteed — see `limits.go`.
+
 ## Runtime Streaming Hooks
 `RunOptions` also supports optional callbacks used by host platforms:
 - `OnStdoutChunk(chunk string, stepsUsed int64)`
@@ -65,6 +75,7 @@ Main tests live at repository root:
 - `checker_v1_test.go`
 - `runtime_v1_test.go`
 - `api_cli_v1_test.go`
+- `depth_limit_test.go`
 
 Run all tests:
 ```bash
