@@ -112,6 +112,12 @@ Defaults (overridable via `RunOptions`):
 - Timeout: `2s`
 - Max steps: `1_000_000`
 
+The parser, checker, and interpreter also each enforce a shared, non-
+configurable nesting-depth limit (`1000` levels of parens, unary/`size`
+prefix chains, array literals, indexing, array types, or blocks) so that
+pathologically nested source is rejected with a `LIMIT_MAX_DEPTH_EXCEEDED`
+diagnostic instead of exhausting the host process's call stack.
+
 ## Go API
 
 ```go
@@ -194,6 +200,7 @@ Examples:
 - `RUNTIME_READ_PARSE`
 - `LIMIT_STEPS_EXCEEDED`
 - `LIMIT_TIMEOUT`
+- `LIMIT_MAX_DEPTH_EXCEEDED`
 
 See:
 - `docs/simpl-v1-spec.md`

@@ -44,3 +44,4 @@ Every diagnostic includes:
 ## Limit Errors
 - `LIMIT_STEPS_EXCEEDED`: Instruction step budget exhausted.
 - `LIMIT_TIMEOUT`: Wall-clock timeout exceeded.
+- `LIMIT_MAX_DEPTH_EXCEEDED`: Source nested too deeply (parentheses, unary/size prefix chains, array literals, indexing, array types, or blocks). Raised by whichever of the parser, checker, or interpreter first walks past the shared nesting-depth limit.

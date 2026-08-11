@@ -24,6 +24,11 @@ type interpreter struct {
 	halted     bool
 	onStdout   func(chunk string, stepsUsed int64)
 	onDiag     func(d Diagnostic)
+
+	// depth tracks how many levels of nested structure (statements
+	// nested in blocks/if/while/for, or nested expressions) are
+	// currently being executed/evaluated on the Go call stack.
+	depth int
 }
 
 func newInterpreter(stdin string, opts RunOptions) *interpreter {
@@ -63,7 +68,35 @@ func (i *interpreter) execStatements(stmts []Stmt) {
 	}
 }
 
+// exceedsDepth records entry into one level of nested structure. It
+// returns true once maxNestingDepth is exceeded, halting execution (like
+// the step/timeout limits in tick) and emitting a diagnostic. Callers
+// must not recurse further once this returns true. execStmt and evalExpr
+// both check i.halted before doing any further work, so once halted is
+// set here, no later call in the same walk can call this again and
+// double-report.
+func (i *interpreter) exceedsDepth(pos Position) bool {
+	if i.depth <= maxNestingDepth {
+		return false
+	}
+	i.halted = true
+	d := newDiagnostic(maxDepthCode, maxDepthCategory, maxDepthMessage, pos, maxDepthHint)
+	i.diags = append(i.diags, d)
+	if i.onDiag != nil {
+		i.onDiag(d)
+	}
+	return true
+}
+
 func (i *interpreter) execStmt(stmt Stmt) {
+	if i.halted {
+		return
+	}
+	i.depth++
+	defer func() { i.depth-- }()
+	if i.exceedsDepth(stmt.Position()) {
+		return
+	}
 	switch s := stmt.(type) {
 	case *DeclStmt:
 		val := zeroValue(s.DeclaredTyp)
@@ -289,6 +322,14 @@ func (i *interpreter) evalCondition(expr Expr) bool {
 }
 
 func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
+	if i.halted {
+		return Value{}, false
+	}
+	i.depth++
+	defer func() { i.depth-- }()
+	if i.exceedsDepth(expr.Position()) {
+		return Value{}, false
+	}
 	switch e := expr.(type) {
 	case *LiteralExpr:
 		switch v := e.Value.(type) {
@@ -571,19 +612,29 @@ func (i *interpreter) assignIndexedTarget(expr *IndexExpr, value Value) {
 	i.scopes[scopeIdx][name] = root
 }
 
+// flattenIndexTarget walks an assignment/push/pop target (an IdentifierExpr
+// optionally wrapped in one or more IndexExpr layers, e.g. `a[1][2][3]`)
+// down to its root variable name and collects the index expressions in
+// left-to-right source order. It is intentionally iterative rather than
+// recursive: it only accumulates a slice while descending through
+// Collection, so an arbitrarily long index chain (`a[0][0][0]...`) cannot
+// grow the Go call stack, regardless of how deep the chain is.
 func flattenIndexTarget(expr Expr) (string, []Expr, bool) {
-	switch e := expr.(type) {
-	case *IdentifierExpr:
-		return e.Name, []Expr{}, true
-	case *IndexExpr:
-		name, idxs, ok := flattenIndexTarget(e.Collection)
-		if !ok {
+	idxs := make([]Expr, 0, 4)
+	cur := expr
+	for {
+		switch e := cur.(type) {
+		case *IdentifierExpr:
+			for l, r := 0, len(idxs)-1; l < r; l, r = l+1, r-1 {
+				idxs[l], idxs[r] = idxs[r], idxs[l]
+			}
+			return e.Name, idxs, true
+		case *IndexExpr:
+			idxs = append(idxs, e.Index)
+			cur = e.Collection
+		default:
 			return "", nil, false
 		}
-		idxs = append(idxs, e.Index)
-		return name, idxs, true
-	default:
-		return "", nil, false
 	}
 }
 
@@ -707,6 +758,14 @@ func pushValues(target *Value, values []Value, pos Position, interp *interpreter
 }
 
 func mutateValueAtIndexes(root *Value, indexes []int64, pos Position, interp *interpreter, mutate func(target *Value) bool) bool {
+	if interp.halted {
+		return false
+	}
+	interp.depth++
+	defer func() { interp.depth-- }()
+	if interp.exceedsDepth(pos) {
+		return false
+	}
 	if len(indexes) == 0 {
 		return mutate(root)
 	}

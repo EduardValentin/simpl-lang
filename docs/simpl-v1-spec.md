@@ -73,7 +73,17 @@ Default limits:
 - Max steps: `1_000_000`
 - Timeout: `2 seconds`
 
-Limits are configurable through `RunOptions`.
+Max steps and timeout are configurable through `RunOptions`.
+
+## Nesting Depth Limit
+The parser, checker, and interpreter each enforce a shared recursion-depth
+limit (`1000` levels) on nested structure: parentheses, unary/`size`
+prefix chains, array literals, indexing, array types, and blocks. Source
+that nests deeper than the limit is rejected with a `LIMIT_MAX_DEPTH_EXCEEDED`
+diagnostic instead of being parsed, type-checked, or executed. This is not
+configurable through `RunOptions` — real Simpl programs never approach it,
+and it exists purely to keep pathologically nested input from exhausting
+the host process's call stack.
 
 ## Comments
 - Only line comments are supported: `// ...`

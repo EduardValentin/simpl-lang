@@ -10,6 +10,14 @@ type symbol struct {
 type checker struct {
 	scopes []map[string]symbol
 	diags  []Diagnostic
+
+	// depth tracks how many levels of nested structure (statements
+	// nested in blocks/if/while/for, or nested expressions) are
+	// currently being walked. depthReported is set once the limit has
+	// been exceeded so only one diagnostic is emitted and later nested
+	// attempts fail fast instead of recursing further.
+	depth         int
+	depthReported bool
 }
 
 func checkProgram(prog *Program) []Diagnostic {
@@ -19,13 +27,39 @@ func checkProgram(prog *Program) []Diagnostic {
 	}
 	c.pushScope()
 	for _, stmt := range prog.Statements {
+		if c.depthReported {
+			break
+		}
 		c.checkStmt(stmt)
 	}
 	c.popScope()
 	return c.diags
 }
 
+// exceedsDepth records entry into one level of nested structure. It
+// returns true once maxNestingDepth is exceeded (or was already exceeded
+// elsewhere), in which case the caller must stop walking children for this
+// call. Pair every call with the corresponding depth-- (via defer) so
+// depth stays accurate on every exit path, including error paths and
+// early returns.
+func (c *checker) exceedsDepth(pos Position) bool {
+	if c.depthReported {
+		return true
+	}
+	if c.depth > maxNestingDepth {
+		c.depthReported = true
+		c.diags = append(c.diags, newDiagnostic(maxDepthCode, maxDepthCategory, maxDepthMessage, pos, maxDepthHint))
+		return true
+	}
+	return false
+}
+
 func (c *checker) checkStmt(stmt Stmt) {
+	c.depth++
+	defer func() { c.depth-- }()
+	if c.exceedsDepth(stmt.Position()) {
+		return
+	}
 	switch s := stmt.(type) {
 	case *DeclStmt:
 		if _, exists := c.scopes[len(c.scopes)-1][s.Name]; exists {
@@ -113,10 +147,13 @@ func (c *checker) checkStmt(stmt Stmt) {
 		c.checkConditionBool(s.Primary.Condition)
 		c.checkStmt(s.Primary.Block)
 		for _, clause := range s.ElseIfs {
+			if c.depthReported {
+				break
+			}
 			c.checkConditionBool(clause.Condition)
 			c.checkStmt(clause.Block)
 		}
-		if s.ElsePart != nil {
+		if s.ElsePart != nil && !c.depthReported {
 			c.checkStmt(s.ElsePart)
 		}
 	case *WhileStmt:
@@ -148,6 +185,9 @@ func (c *checker) checkStmt(stmt Stmt) {
 	case *BlockStmt:
 		c.pushScope()
 		for _, nested := range s.Statements {
+			if c.depthReported {
+				break
+			}
 			c.checkStmt(nested)
 		}
 		c.popScope()
@@ -155,6 +195,11 @@ func (c *checker) checkStmt(stmt Stmt) {
 }
 
 func (c *checker) checkExpr(expr Expr, expected *Type) Type {
+	c.depth++
+	defer func() { c.depth-- }()
+	if c.exceedsDepth(expr.Position()) {
+		return invalidType()
+	}
 	switch e := expr.(type) {
 	case *LiteralExpr:
 		switch v := e.Value.(type) {
@@ -329,7 +374,20 @@ func (c *checker) checkConditionBool(expr Expr) {
 	}
 }
 
+// isMutableTarget recurses through IndexExpr.Collection the same way
+// checkExpr does, so it carries its own depth guard rather than relying on
+// checkStmt always calling checkExpr on the same target first. Today every
+// call site does call checkExpr(s.Target, ...) first and short-circuits on
+// TypeInvalid before reaching here, which incidentally already bounds this
+// recursion — but that is an implicit coupling between two call sites, not
+// an enforced invariant, and the next statement kind to call this could
+// easily miss it.
 func (c *checker) isMutableTarget(expr Expr) bool {
+	c.depth++
+	defer func() { c.depth-- }()
+	if c.exceedsDepth(expr.Position()) {
+		return false
+	}
 	switch e := expr.(type) {
 	case *IdentifierExpr:
 		sym, ok := c.lookup(e.Name)
