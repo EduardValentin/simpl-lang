@@ -57,7 +57,9 @@ Defined in `limits.go`:
   indexing, array types, blocks). Not configurable — it exists purely to
   keep pathologically nested source from exhausting the host process's
   call stack (a fatal, unrecoverable Go runtime error, not a panic).
-  Exceeding it produces a `LIMIT_MAX_DEPTH_EXCEEDED` diagnostic.
+  Exceeding it produces a `LIMIT_MAX_DEPTH_EXCEEDED` diagnostic. Once
+  that diagnostic has been reported, further diagnostic accumulation for
+  the same program is not guaranteed — see `limits.go`.
 
 ## Runtime Streaming Hooks
 `RunOptions` also supports optional callbacks used by host platforms:
