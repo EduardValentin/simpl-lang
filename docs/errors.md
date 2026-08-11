@@ -56,3 +56,7 @@ Every diagnostic includes:
   expression in the same `write` statement). Treat
   `LIMIT_MAX_DEPTH_EXCEEDED` as reporting only that one problem, not as a
   complete list of everything wrong with the program.
+- `LIMIT_VALUE_ALLOCATION_EXCEEDED`: Runtime value allocation budget exhausted or allocation sizing overflowed.
+- `LIMIT_INVALID_VALUE_ALLOCATION_LIMIT`: Configured runtime value allocation byte budget is negative.
+- `LIMIT_OUTPUT_EXCEEDED`: Configured stdout byte budget exhausted.
+- `LIMIT_INVALID_OUTPUT_LIMIT`: Configured stdout byte budget is negative.
