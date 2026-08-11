@@ -159,7 +159,7 @@ func TestDepthLimit_DoesNotRejectManySequentialShallowStatements(t *testing.T) {
 	// statements/expressions must not falsely trip the limit just
 	// because it has a lot of them. This guards against a depth
 	// counter that is incremented on entry but never decremented on
-	// exit (the exact bug called out in the implementation plan).
+	// exit — the pattern this guard is specifically designed to avoid.
 	const width = 5 * maxNestingDepth
 
 	var b strings.Builder
