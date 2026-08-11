@@ -354,3 +354,74 @@ func TestDepthLimit_NestedBlocksDoNotCrashAndReturnDiagnostic(t *testing.T) {
 
 	assertSingleMaxDepthDiagnostic(t, result.Diagnostics)
 }
+
+// --- Interaction tests: depth guard combined with the other runtime limits ---
+//
+// GEN-146 added MaxValueAllocationBytes, MaxOutputBytes, and context
+// cancellation as additional ways evalExprWithMode/execStmt/cloneValue can
+// return early, alongside the pre-existing depth guard. Before these
+// tests, that interaction was only ever checked by hand with throwaway
+// probe scripts during PR review (verifying that a depth bail-out never
+// touches valueAllocationBytes, and that an allocation failure never
+// skips a depth decrement), then discarded — so the one genuinely new
+// property of the GEN-146/depth-limit merge had zero regression coverage.
+// These pin it down permanently.
+
+func TestDepthLimit_DeepASTUnderTinyValueAllocationBudgetStillReportsDepthLimit(t *testing.T) {
+	prog := &Program{
+		Statements: []Stmt{
+			&WriteStmt{
+				Pos:    Position{Line: 1, Column: 1},
+				Values: []Expr{deeplyNestedUnaryExpr(wellOverLimit)},
+			},
+		},
+	}
+
+	// A budget this tiny would reject essentially any runtime value
+	// allocation. The depth guard must still win: exceedsDepth is
+	// checked in evalExprWithMode before any allocation-charging code
+	// runs, so unwinding a well-over-limit unary chain must report the
+	// depth diagnostic, not an allocation one, and the depth bail-out
+	// must not have charged anything against the allocation budget.
+	interp := newInterpreter("", normalizeOptions(RunOptions{MaxValueAllocationBytes: 1}))
+	result := interp.run(prog)
+
+	assertSingleMaxDepthDiagnostic(t, result.Diagnostics)
+	if interp.valueAllocationBytes != 0 {
+		t.Fatalf("expected a depth bail-out to charge no value allocation, got %d bytes charged", interp.valueAllocationBytes)
+	}
+	if interp.depth != 0 {
+		t.Fatalf("expected interpreter depth to unwind back to 0 after a depth-limit bail-out, got %d", interp.depth)
+	}
+}
+
+func TestDepthLimit_AllocationFailureMidLoopUnwindsDepthToZero(t *testing.T) {
+	// A loop that keeps growing a string via push, well within the
+	// nesting-depth limit on its own, run against a value-allocation
+	// budget small enough to be exhausted partway through. The
+	// allocation failure has to propagate all the way back out through
+	// execPush/execStmt without skipping any of the depth-decrement
+	// defers it passed through on the way in.
+	src := `var s string = ""
+var i int = 0
+while i < 1000000 {
+    push s, "x"
+    i = i + 1
+}
+write size s`
+
+	prog, diags := compileSource(src)
+	if len(diags) != 0 {
+		t.Fatalf("expected source to compile cleanly, got diagnostics: %+v", diags)
+	}
+
+	interp := newInterpreter("", normalizeOptions(RunOptions{MaxValueAllocationBytes: 4096}))
+	result := interp.run(prog)
+
+	if len(result.Diagnostics) != 1 || result.Diagnostics[0].Code != "LIMIT_VALUE_ALLOCATION_EXCEEDED" {
+		t.Fatalf("expected exactly one LIMIT_VALUE_ALLOCATION_EXCEEDED diagnostic, got %+v", result.Diagnostics)
+	}
+	if interp.depth != 0 {
+		t.Fatalf("expected interpreter depth to unwind back to 0 after an allocation failure, got %d", interp.depth)
+	}
+}

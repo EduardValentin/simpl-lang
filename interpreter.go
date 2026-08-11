@@ -86,10 +86,11 @@ func (i *interpreter) execStatements(stmts []Stmt) {
 // exceedsDepth records entry into one level of nested structure. It
 // returns true once maxNestingDepth is exceeded, halting execution (like
 // the step/timeout limits in tick) and emitting a diagnostic. Callers
-// must not recurse further once this returns true. execStmt and evalExpr
-// both check i.halted before doing any further work, so once halted is
-// set here, no later call in the same walk can call this again and
-// double-report.
+// must not recurse further once this returns true. execStmt and
+// evalExprWithMode (the recursive expression evaluator behind both the
+// evalExpr and evalOutputExpr wrappers) both check i.halted before doing
+// any further work, so once halted is set here, no later call in the
+// same walk can call this again and double-report.
 func (i *interpreter) exceedsDepth(pos Position) bool {
 	if i.depth <= maxNestingDepth {
 		return false

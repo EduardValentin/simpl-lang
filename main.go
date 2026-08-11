@@ -13,7 +13,22 @@ const (
 )
 
 // RunOptions configures runtime safety limits.
+//
+// Compile-phase gap: Context, Timeout, and MaxSteps all bound execution
+// only (the interp.run phase, after compileSource has already returned).
+// Lexing, parsing, and type-checking run as a single uninterruptible
+// unit — compileSource does not receive opts at all, so no cancellation,
+// deadline, or step budget is consulted until compilation has finished.
+// A large enough source can therefore hold the CPU for as long as
+// compilation takes regardless of Context or Timeout. Hosts that accept
+// untrusted or attacker-influenced source MUST impose their own hard cap
+// on source length before calling Run/Validate/RunFile; do not rely on
+// Context or Timeout to bound compilation.
 type RunOptions struct {
+	// Context, when non-nil, cancels execution (not compilation — see the
+	// compile-phase gap noted on RunOptions above). Cancellation returns
+	// stdout already emitted, suppresses later callbacks and limit
+	// diagnostics, and remains observable through Context.Err().
 	Context  context.Context
 	MaxSteps int64
 	// MaxValueAllocationBytes limits cumulative semantic value allocations, not the whole Go heap.
@@ -23,7 +38,10 @@ type RunOptions struct {
 	// host input independently. Zero is unlimited; negative values are invalid.
 	MaxValueAllocationBytes int64
 	MaxOutputBytes          int
-	Timeout                 time.Duration
+	// Timeout bounds execution wall-clock time only (not compilation —
+	// see the compile-phase gap noted on RunOptions above). Defaults to
+	// 2s when zero or negative.
+	Timeout time.Duration
 
 	// OnStdoutChunk is called whenever write emits text during execution.
 	OnStdoutChunk func(chunk string, stepsUsed int64)

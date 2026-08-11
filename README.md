@@ -118,6 +118,8 @@ Defaults (overridable via `RunOptions`):
 
 `RunOptions.Context` stops execution when its context is canceled. Cancellation returns stdout already emitted, suppresses later callbacks and limit diagnostics, and remains observable through `Context.Err()`. Callback panics are trusted host failures and propagate to the caller.
 
+**Compile-phase gap:** `Context`, `Timeout`, and `MaxSteps` bound *execution* only. Lexing, parsing, and type-checking run as a single uninterruptible unit before execution ever starts — none of them are consulted during compilation, so a canceled context, an elapsed timeout, or a large source cannot be interrupted mid-compile. Hosts that accept untrusted or attacker-influenced source must impose their own hard cap on source length before calling `Run`/`Validate`/`RunFile`; do not rely on `Context` or `Timeout` to bound how long compilation takes.
+
 The parser, checker, and interpreter also each enforce a shared, non-
 configurable nesting-depth limit (`1000` levels of parens, unary/`size`
 prefix chains, array literals, indexing, array types, or blocks) so that
