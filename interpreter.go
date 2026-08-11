@@ -1,6 +1,7 @@
 package simpl
 
 import (
+	"context"
 	"fmt"
 	"strings"
 	"time"
@@ -11,19 +12,30 @@ type runtimeVar struct {
 	mutable bool
 }
 
+type evaluationValueMode uint8
+
+const (
+	copyEvaluationValues evaluationValueMode = iota
+	borrowEvaluationValues
+)
+
 type interpreter struct {
-	scopes     []map[string]runtimeVar
-	diags      []Diagnostic
-	stdout     strings.Builder
-	input      []string
-	inputIndex int
-	steps      int64
-	maxSteps   int64
-	deadline   time.Time
-	timedOut   bool
-	halted     bool
-	onStdout   func(chunk string, stepsUsed int64)
-	onDiag     func(d Diagnostic)
+	scopes                  []map[string]runtimeVar
+	diags                   []Diagnostic
+	stdout                  strings.Builder
+	input                   []string
+	inputIndex              int
+	steps                   int64
+	maxSteps                int64
+	valueAllocationBytes    int64
+	maxValueAllocationBytes int64
+	maxOutputBytes          int
+	deadline                time.Time
+	ctx                     context.Context
+	timedOut                bool
+	halted                  bool
+	onStdout                func(chunk string, stepsUsed int64)
+	onDiag                  func(d Diagnostic)
 
 	// depth tracks how many levels of nested structure (statements
 	// nested in blocks/if/while/for, or nested expressions) are
@@ -33,13 +45,16 @@ type interpreter struct {
 
 func newInterpreter(stdin string, opts RunOptions) *interpreter {
 	return &interpreter{
-		scopes:   make([]map[string]runtimeVar, 0, 8),
-		diags:    make([]Diagnostic, 0, 8),
-		input:    strings.Fields(stdin),
-		maxSteps: opts.MaxSteps,
-		deadline: time.Now().Add(opts.Timeout),
-		onStdout: opts.OnStdoutChunk,
-		onDiag:   opts.OnDiagnostic,
+		scopes:                  make([]map[string]runtimeVar, 0, 8),
+		diags:                   make([]Diagnostic, 0, 8),
+		input:                   strings.Fields(stdin),
+		maxSteps:                opts.MaxSteps,
+		maxValueAllocationBytes: opts.MaxValueAllocationBytes,
+		maxOutputBytes:          opts.MaxOutputBytes,
+		deadline:                time.Now().Add(opts.Timeout),
+		ctx:                     opts.Context,
+		onStdout:                opts.OnStdoutChunk,
+		onDiag:                  opts.OnDiagnostic,
 	}
 }
 
@@ -71,10 +86,11 @@ func (i *interpreter) execStatements(stmts []Stmt) {
 // exceedsDepth records entry into one level of nested structure. It
 // returns true once maxNestingDepth is exceeded, halting execution (like
 // the step/timeout limits in tick) and emitting a diagnostic. Callers
-// must not recurse further once this returns true. execStmt and evalExpr
-// both check i.halted before doing any further work, so once halted is
-// set here, no later call in the same walk can call this again and
-// double-report.
+// must not recurse further once this returns true. execStmt and
+// evalExprWithMode (the recursive expression evaluator behind both the
+// evalExpr and evalOutputExpr wrappers) both check i.halted before doing
+// any further work, so once halted is set here, no later call in the
+// same walk can call this again and double-report.
 func (i *interpreter) exceedsDepth(pos Position) bool {
 	if i.depth <= maxNestingDepth {
 		return false
@@ -105,7 +121,10 @@ func (i *interpreter) execStmt(stmt Stmt) {
 			if !ok {
 				return
 			}
-			val = cloneValue(evaluated)
+			val, ok = i.cloneValue(evaluated, s.Initializer.Position())
+			if !ok {
+				return
+			}
 		}
 		i.scopes[len(i.scopes)-1][s.Name] = runtimeVar{value: val, mutable: !s.Const}
 	case *AssignStmt:
@@ -118,14 +137,21 @@ func (i *interpreter) execStmt(stmt Stmt) {
 		i.execRead(s)
 	case *WriteStmt:
 		for _, expr := range s.Values {
-			v, ok := i.evalExpr(expr)
+			if i.contextCanceled() {
+				i.halted = true
+				return
+			}
+			v, ok := i.evalOutputExpr(expr)
 			if !ok {
 				return
 			}
-			chunk := valueToString(v)
-			i.stdout.WriteString(chunk)
-			if i.onStdout != nil {
-				i.onStdout(chunk, i.steps)
+			if i.contextCanceled() {
+				i.halted = true
+				return
+			}
+			i.writeValue(v, expr.Position())
+			if i.halted {
+				return
 			}
 		}
 	case *PushStmt:
@@ -234,7 +260,10 @@ func (i *interpreter) execRead(stmt *ReadStmt) {
 	}
 	token := i.input[i.inputIndex]
 	i.inputIndex++
-	parsed, err := parseInputToken(token, v.value.Type)
+	parsed, err, ok := i.parseRuntimeInputToken(token, v.value.Type, stmt.Pos)
+	if !ok {
+		return
+	}
 	if err != nil {
 		i.addRuntimeDiag("RUNTIME_READ_PARSE", fmt.Sprintf("Input token '%s' cannot be parsed as %s.", token, v.value.Type.String()), stmt.Pos, "Ensure input tokens match variable types.")
 		return
@@ -264,7 +293,10 @@ func (i *interpreter) execPop(stmt *PopStmt) {
 		return
 	}
 
-	mutable := cloneValue(root.value)
+	mutable, ok := i.cloneValue(root.value, stmt.Pos)
+	if !ok {
+		return
+	}
 	if !mutateValueAtIndexes(&mutable, indexes, stmt.Pos, i, func(target *Value) bool {
 		return popValue(target, stmt.Pos, i)
 	}) {
@@ -295,9 +327,12 @@ func (i *interpreter) execPush(stmt *PushStmt) {
 		return
 	}
 
-	mutable := cloneValue(root.value)
+	mutable, ok := i.cloneValue(root.value, stmt.Pos)
+	if !ok {
+		return
+	}
 	if !mutateValueAtIndexes(&mutable, indexes, stmt.Pos, i, func(target *Value) bool {
-		values, ok := i.evalPushValues(target.Type, stmt.Values)
+		values, ok := i.evalPushValues(target.Type, stmt.Values, stmt.Pos)
 		if !ok {
 			return false
 		}
@@ -322,6 +357,22 @@ func (i *interpreter) evalCondition(expr Expr) bool {
 }
 
 func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
+	return i.evalExprWithMode(expr, copyEvaluationValues)
+}
+
+func (i *interpreter) evalOutputExpr(expr Expr) (Value, bool) {
+	return i.evalExprWithMode(expr, borrowEvaluationValues)
+}
+
+// evalExprWithMode is the actual recursive expression evaluator: every
+// nested-expression path (unary/binary operands, grouping, array literal
+// elements, index collection/index) recurses back into this function
+// directly rather than through the evalExpr/evalOutputExpr wrappers above,
+// so the depth guard has to live here to see every level of expression
+// nesting. Guarding only the thin wrappers would count one increment per
+// statement-level expression instead of one per nesting level, silently
+// defeating the recursion-depth limit for parens/unary/index chains.
+func (i *interpreter) evalExprWithMode(expr Expr, mode evaluationValueMode) (Value, bool) {
 	if i.halted {
 		return Value{}, false
 	}
@@ -330,6 +381,11 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 	if i.exceedsDepth(expr.Position()) {
 		return Value{}, false
 	}
+	if i.contextCanceled() {
+		i.halted = true
+		return Value{}, false
+	}
+
 	switch e := expr.(type) {
 	case *LiteralExpr:
 		switch v := e.Value.(type) {
@@ -340,7 +396,7 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 		case bool:
 			return Value{Type: Type{Kind: TypeBool}, Bool: v}, true
 		case string:
-			return newStringValue(v), true
+			return i.newRuntimeStringValue(Type{Kind: TypeString}, v, e.Pos)
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "Invalid literal value.", e.Pos, "Use supported literal types.")
 			return Value{}, false
@@ -351,9 +407,9 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 			i.addRuntimeDiag("RUNTIME_UNDECLARED", fmt.Sprintf("Variable '%s' is not declared.", e.Name), e.Pos, "Declare it before use.")
 			return Value{}, false
 		}
-		return cloneValue(v.value), true
+		return i.evaluationValue(v.value, mode, e.Pos)
 	case *UnaryExpr:
-		right, ok := i.evalExpr(e.Right)
+		right, ok := i.evalExprWithMode(e.Right, mode)
 		if !ok {
 			return Value{}, false
 		}
@@ -378,7 +434,7 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 			return Value{}, false
 		}
 	case *SizeExpr:
-		value, ok := i.evalExpr(e.Value)
+		value, ok := i.evalExprWithMode(e.Value, mode)
 		if !ok {
 			return Value{}, false
 		}
@@ -386,51 +442,65 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 		case TypeArray:
 			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(value.Array))}, true
 		case TypeString:
-			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(stringRunes(value)))}, true
+			runes, ok := i.valueRunes(value, e.Pos)
+			if !ok {
+				return Value{}, false
+			}
+			return Value{Type: Type{Kind: TypeInt}, Int: int64(len(runes))}, true
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "size requires an array or string value.", e.Pos, "Use size only on arrays and strings.")
 			return Value{}, false
 		}
 	case *BinaryExpr:
-		left, ok := i.evalExpr(e.Left)
+		left, ok := i.evalExprWithMode(e.Left, mode)
 		if !ok {
 			return Value{}, false
 		}
-		right, ok := i.evalExpr(e.Right)
+		right, ok := i.evalExprWithMode(e.Right, mode)
 		if !ok {
 			return Value{}, false
 		}
 		return i.evalBinary(e, left, right)
 	case *GroupExpr:
-		return i.evalExpr(e.Inner)
+		return i.evalExprWithMode(e.Inner, mode)
 	case *ArrayLiteralExpr:
-		arr := make([]Value, len(e.Elements))
+		arr, ok := i.makeRuntimeValueSlice(len(e.Elements), len(e.Elements), e.Pos)
+		if !ok {
+			return Value{}, false
+		}
 		var elemType *Type
 		for idx := range e.Elements {
-			v, ok := i.evalExpr(e.Elements[idx])
+			v, ok := i.evalExprWithMode(e.Elements[idx], mode)
 			if !ok {
 				return Value{}, false
 			}
 			if elemType == nil {
-				t := v.Type
-				elemType = &t
+				elemType, ok = i.copyRuntimeType(v.Type, e.Elements[idx].Position())
+				if !ok {
+					return Value{}, false
+				}
 			} else if !v.Type.Equals(*elemType) {
 				i.addRuntimeDiag("RUNTIME_TYPE", "Array literal contains mixed element types.", e.Elements[idx].Position(), "Use homogeneous array element types.")
 				return Value{}, false
 			}
-			arr[idx] = cloneValue(v)
+			arr[idx], ok = i.evaluationValue(v, mode, e.Elements[idx].Position())
+			if !ok {
+				return Value{}, false
+			}
 		}
 		if elemType == nil {
-			unknown := invalidType()
-			elemType = &unknown
+			elemType, ok = i.copyRuntimeType(invalidType(), e.Pos)
+			if !ok {
+				return Value{}, false
+			}
 		}
 		return Value{Type: Type{Kind: TypeArray, Elem: elemType}, Array: arr}, true
 	case *IndexExpr:
-		collection, ok := i.evalExpr(e.Collection)
+		collection, ok := i.evalExprWithMode(e.Collection, mode)
 		if !ok {
 			return Value{}, false
 		}
-		idxValue, ok := i.evalExpr(e.Index)
+		idxValue, ok := i.evalExprWithMode(e.Index, mode)
 		if !ok {
 			return Value{}, false
 		}
@@ -444,14 +514,17 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within array bounds.")
 				return Value{}, false
 			}
-			return cloneValue(collection.Array[idxValue.Int]), true
+			return i.evaluationValue(collection.Array[idxValue.Int], mode, e.Pos)
 		case TypeString:
-			runes := stringRunes(collection)
+			runes, ok := i.valueRunes(collection, e.Pos)
+			if !ok {
+				return Value{}, false
+			}
 			if idxValue.Int < 0 || idxValue.Int >= int64(len(runes)) {
 				i.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", e.Index.Position(), "Use an index within string bounds.")
 				return Value{}, false
 			}
-			return newStringValueFromRunes(Type{Kind: TypeString}, []rune{runes[idxValue.Int]}), true
+			return i.newRuntimeSingleRuneString(Type{Kind: TypeString}, runes[idxValue.Int], e.Pos)
 		default:
 			i.addRuntimeDiag("RUNTIME_TYPE", "Index target is not an array or string.", e.Pos, "Use indexing only on arrays and strings.")
 			return Value{}, false
@@ -462,14 +535,18 @@ func (i *interpreter) evalExpr(expr Expr) (Value, bool) {
 	}
 }
 
+func (i *interpreter) evaluationValue(value Value, mode evaluationValueMode, pos Position) (Value, bool) {
+	if mode == borrowEvaluationValues {
+		return value, true
+	}
+	return i.cloneValue(value, pos)
+}
+
 func (i *interpreter) evalBinary(expr *BinaryExpr, left, right Value) (Value, bool) {
 	switch expr.Operator {
 	case TokenPlus:
 		if left.Type.Kind == TypeString && right.Type.Kind == TypeString {
-			combined := make([]rune, 0, len(stringRunes(left))+len(stringRunes(right)))
-			combined = append(combined, stringRunes(left)...)
-			combined = append(combined, stringRunes(right)...)
-			return newStringValueFromRunes(Type{Kind: TypeString}, combined), true
+			return i.concatenateRuntimeStrings(left, right, expr.Pos)
 		}
 		if left.Type.Kind == TypeInt && right.Type.Kind == TypeInt {
 			return Value{Type: Type{Kind: TypeInt}, Int: left.Int + right.Int}, true
@@ -544,11 +621,21 @@ func (i *interpreter) evalBinary(expr *BinaryExpr, left, right Value) (Value, bo
 		}
 	case TokenEqual:
 		if left.Type.Equals(right.Type) {
-			return Value{Type: Type{Kind: TypeBool}, Bool: valuesEqual(left, right)}, true
+			equal, canceled := valuesEqualWithCancel(left, right, i.contextCanceled)
+			if canceled {
+				i.halted = true
+				return Value{}, false
+			}
+			return Value{Type: Type{Kind: TypeBool}, Bool: equal}, true
 		}
 	case TokenNotEqual:
 		if left.Type.Equals(right.Type) {
-			return Value{Type: Type{Kind: TypeBool}, Bool: !valuesEqual(left, right)}, true
+			equal, canceled := valuesEqualWithCancel(left, right, i.contextCanceled)
+			if canceled {
+				i.halted = true
+				return Value{}, false
+			}
+			return Value{Type: Type{Kind: TypeBool}, Bool: !equal}, true
 		}
 	}
 	i.addRuntimeDiag("RUNTIME_TYPE", "Invalid operand types for operator.", expr.Pos, "Use matching operand types for this operator.")
@@ -571,7 +658,11 @@ func (i *interpreter) assignTarget(target Expr, value Value) {
 			i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot assign %s to %s.", value.Type.String(), cur.value.Type.String()), t.Pos, "Assign values with matching types.")
 			return
 		}
-		cur.value = cloneValue(value)
+		cloned, ok := i.cloneValue(value, t.Pos)
+		if !ok {
+			return
+		}
+		cur.value = cloned
 		i.scopes[scopeIdx][t.Name] = cur
 	case *IndexExpr:
 		i.assignIndexedTarget(t, value)
@@ -602,7 +693,10 @@ func (i *interpreter) assignIndexedTarget(expr *IndexExpr, value Value) {
 		return
 	}
 
-	mutable := cloneValue(root.value)
+	mutable, ok := i.cloneValue(root.value, expr.Pos)
+	if !ok {
+		return
+	}
 	if !mutateValueAtIndexes(&mutable, indexes, expr.Pos, i, func(target *Value) bool {
 		return assignValue(target, value, expr.Pos, i)
 	}) {
@@ -659,7 +753,11 @@ func assignValue(target *Value, newValue Value, pos Position, interp *interprete
 		interp.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot assign %s to %s.", newValue.Type.String(), target.Type.String()), pos, "Assign values with matching element type.")
 		return false
 	}
-	*target = cloneValue(newValue)
+	cloned, ok := interp.cloneValue(newValue, pos)
+	if !ok {
+		return false
+	}
+	*target = cloned
 	return true
 }
 
@@ -673,22 +771,27 @@ func popValue(target *Value, pos Position, interp *interpreter) bool {
 		target.Array = target.Array[:len(target.Array)-1]
 		return true
 	case TypeString:
-		runes := stringRunes(*target)
+		runes, ok := interp.valueRunes(*target, pos)
+		if !ok {
+			return false
+		}
 		if len(runes) == 0 {
 			interp.addRuntimeDiag("RUNTIME_POP_EMPTY", "Cannot pop from an empty string.", pos, "Ensure the string has at least one character before popping.")
 			return false
 		}
 		target.Runes = runes[:len(runes)-1]
-		target.String = string(target.Runes)
-		return true
+		return interp.refreshRuntimeString(target, pos)
 	default:
 		interp.addRuntimeDiag("RUNTIME_TYPE", "pop requires an array or string target.", pos, "Use pop only on arrays and strings.")
 		return false
 	}
 }
 
-func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bool) {
-	values := make([]Value, 0, len(exprs))
+func (i *interpreter) evalPushValues(targetType Type, exprs []Expr, pos Position) ([]Value, bool) {
+	values, ok := i.makeRuntimeValueSlice(0, len(exprs), pos)
+	if !ok {
+		return nil, false
+	}
 	switch targetType.Kind {
 	case TypeArray:
 		if targetType.Elem == nil {
@@ -704,7 +807,11 @@ func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bo
 				i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot push %s into array of %s.", value.Type.String(), targetType.Elem.String()), expr.Position(), "Push values with the array element type.")
 				return nil, false
 			}
-			values = append(values, cloneValue(value))
+			cloned, ok := i.cloneValue(value, expr.Position())
+			if !ok {
+				return nil, false
+			}
+			values = append(values, cloned)
 		}
 	case TypeString:
 		for _, expr := range exprs {
@@ -716,11 +823,19 @@ func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bo
 				i.addRuntimeDiag("RUNTIME_TYPE", fmt.Sprintf("Cannot push %s into string target.", value.Type.String()), expr.Position(), "Push string values into strings.")
 				return nil, false
 			}
-			if len(stringRunes(value)) != 1 {
+			runes, ok := i.valueRunes(value, expr.Position())
+			if !ok {
+				return nil, false
+			}
+			if len(runes) != 1 {
 				i.addRuntimeDiag("RUNTIME_TYPE", "String push requires a single-character string.", expr.Position(), "Push a string containing exactly one character.")
 				return nil, false
 			}
-			values = append(values, cloneValue(value))
+			cloned, ok := i.cloneValue(value, expr.Position())
+			if !ok {
+				return nil, false
+			}
+			values = append(values, cloned)
 		}
 	default:
 		i.addRuntimeDiag("RUNTIME_TYPE", "push requires an array or string target.", exprs[0].Position(), "Use push only on arrays and strings.")
@@ -732,16 +847,33 @@ func (i *interpreter) evalPushValues(targetType Type, exprs []Expr) ([]Value, bo
 func pushValues(target *Value, values []Value, pos Position, interp *interpreter) bool {
 	switch target.Type.Kind {
 	case TypeArray:
-		target.Array = growValueSlice(target.Array, len(values))
+		grown, ok := interp.growRuntimeValueSlice(target.Array, len(values), pos)
+		if !ok {
+			return false
+		}
+		target.Array = grown
 		for _, value := range values {
-			target.Array = append(target.Array, cloneValue(value))
+			cloned, ok := interp.cloneValue(value, pos)
+			if !ok {
+				return false
+			}
+			target.Array = append(target.Array, cloned)
 		}
 		return true
 	case TypeString:
-		runes := stringRunes(*target)
-		runes = growRuneSlice(runes, len(values))
+		runes, ok := interp.valueRunes(*target, pos)
+		if !ok {
+			return false
+		}
+		runes, ok = interp.growRuntimeRuneSlice(runes, len(values), pos)
+		if !ok {
+			return false
+		}
 		for _, value := range values {
-			valueRunes := stringRunes(value)
+			valueRunes, ok := interp.valueRunes(value, pos)
+			if !ok {
+				return false
+			}
 			if len(valueRunes) != 1 {
 				interp.addRuntimeDiag("RUNTIME_TYPE", "String push requires a single-character string.", pos, "Push a string containing exactly one character.")
 				return false
@@ -749,8 +881,7 @@ func pushValues(target *Value, values []Value, pos Position, interp *interpreter
 			runes = append(runes, valueRunes[0])
 		}
 		target.Runes = runes
-		target.String = string(runes)
-		return true
+		return interp.refreshRuntimeString(target, pos)
 	default:
 		interp.addRuntimeDiag("RUNTIME_TYPE", "push requires an array or string target.", pos, "Use push only on arrays and strings.")
 		return false
@@ -783,24 +914,32 @@ func mutateValueAtIndexes(root *Value, indexes []int64, pos Position, interp *in
 		root.Array[idx] = child
 		return true
 	case TypeString:
-		runes := stringRunes(*root)
+		runes, ok := interp.valueRunes(*root, pos)
+		if !ok {
+			return false
+		}
 		if idx < 0 || idx >= int64(len(runes)) {
 			interp.addRuntimeDiag("RUNTIME_INDEX_OOB", "Sequence index is out of range.", pos, "Use an index within string bounds.")
 			return false
 		}
-		child := newStringValueFromRunes(Type{Kind: TypeString}, []rune{runes[idx]})
+		child, ok := interp.newRuntimeSingleRuneString(Type{Kind: TypeString}, runes[idx], pos)
+		if !ok {
+			return false
+		}
 		if !mutateValueAtIndexes(&child, indexes[1:], pos, interp, mutate) {
 			return false
 		}
-		childRunes := stringRunes(child)
+		childRunes, ok := interp.valueRunes(child, pos)
+		if !ok {
+			return false
+		}
 		if len(childRunes) != 1 {
 			interp.addRuntimeDiag("RUNTIME_TYPE", "String index assignment requires a single-character string.", pos, "Assign a string containing exactly one character.")
 			return false
 		}
 		runes[idx] = childRunes[0]
 		root.Runes = runes
-		root.String = string(runes)
-		return true
+		return interp.refreshRuntimeString(root, pos)
 	default:
 		interp.addRuntimeDiag("RUNTIME_TYPE", "Indexed assignment target is not an array or string.", pos, "Use indexing only on arrays and strings.")
 		return false
@@ -827,28 +966,64 @@ func (i *interpreter) popScope() {
 	i.scopes = i.scopes[:len(i.scopes)-1]
 }
 
+func (i *interpreter) reserveValueAllocation(bytes int64, valid bool, pos Position) bool {
+	if i.contextCanceled() {
+		i.halted = true
+		return false
+	}
+	if i.halted {
+		return false
+	}
+
+	nextValueBytes, totalValid := checkedAllocationByteSum(i.valueAllocationBytes, bytes)
+	if !valid || !totalValid || i.maxValueAllocationBytes < 0 {
+		i.rejectValueAllocation(pos)
+		return false
+	}
+	if i.maxValueAllocationBytes > 0 && nextValueBytes > i.maxValueAllocationBytes {
+		i.rejectValueAllocation(pos)
+		return false
+	}
+	i.valueAllocationBytes = nextValueBytes
+	return true
+}
+
+func (i *interpreter) rejectValueAllocation(pos Position) {
+	if i.contextCanceled() {
+		i.halted = true
+		return
+	}
+	if i.halted {
+		return
+	}
+	i.halted = true
+	i.emitDiagnostic(newDiagnostic(
+		"LIMIT_VALUE_ALLOCATION_EXCEEDED",
+		"limit",
+		"Execution value allocation limit exceeded.",
+		pos,
+		"Reduce runtime string or array growth, or increase the value allocation byte limit.",
+	))
+}
+
 func (i *interpreter) tick(pos Position) bool {
 	if i.halted {
+		return false
+	}
+	if i.contextCanceled() {
+		i.halted = true
 		return false
 	}
 	if !i.deadline.IsZero() && time.Now().After(i.deadline) {
 		i.timedOut = true
 		i.halted = true
-		d := newDiagnostic("LIMIT_TIMEOUT", "limit", "Execution timed out.", pos, "Optimize the loop or increase timeout for this exercise.")
-		i.diags = append(i.diags, d)
-		if i.onDiag != nil {
-			i.onDiag(d)
-		}
+		i.emitDiagnostic(newDiagnostic("LIMIT_TIMEOUT", "limit", "Execution timed out.", pos, "Optimize the loop or increase timeout for this exercise."))
 		return false
 	}
 	i.steps++
 	if i.maxSteps > 0 && i.steps > i.maxSteps {
 		i.halted = true
-		d := newDiagnostic("LIMIT_STEPS_EXCEEDED", "limit", "Execution step limit exceeded.", pos, "Check for infinite loops or reduce algorithm steps.")
-		i.diags = append(i.diags, d)
-		if i.onDiag != nil {
-			i.onDiag(d)
-		}
+		i.emitDiagnostic(newDiagnostic("LIMIT_STEPS_EXCEEDED", "limit", "Execution step limit exceeded.", pos, "Check for infinite loops or reduce algorithm steps."))
 		return false
 	}
 	return true
@@ -856,9 +1031,56 @@ func (i *interpreter) tick(pos Position) bool {
 
 func (i *interpreter) addRuntimeDiag(code, message string, pos Position, hint string) {
 	i.halted = true
-	d := newDiagnostic(code, "runtime", message, pos, hint)
+	i.emitDiagnostic(newDiagnostic(code, "runtime", message, pos, hint))
+}
+
+func (i *interpreter) writeValue(value Value, pos Position) {
+	var chunk string
+	exceeded := false
+	canceled := false
+	if i.maxOutputBytes > 0 {
+		remaining := i.maxOutputBytes - i.stdout.Len()
+		if remaining < 0 {
+			remaining = 0
+		}
+		chunk, exceeded, canceled = valueToStringWithinBytes(value, remaining, i.contextCanceled)
+	} else {
+		chunk, _, canceled = formatValue(value, 0, false, i.contextCanceled)
+	}
+	if canceled || i.contextCanceled() {
+		i.halted = true
+		return
+	}
+
+	i.stdout.WriteString(chunk)
+	if i.onStdout != nil && (!exceeded || chunk != "") {
+		i.onStdout(chunk, i.steps)
+	}
+	if i.contextCanceled() {
+		i.halted = true
+		return
+	}
+	if !exceeded {
+		return
+	}
+
+	i.halted = true
+	i.emitDiagnostic(newDiagnostic(
+		"LIMIT_OUTPUT_EXCEEDED",
+		"limit",
+		"Execution output limit exceeded.",
+		pos,
+		"Reduce the amount of output produced by the program.",
+	))
+}
+
+func (i *interpreter) emitDiagnostic(d Diagnostic) {
 	i.diags = append(i.diags, d)
 	if i.onDiag != nil {
 		i.onDiag(d)
 	}
+}
+
+func (i *interpreter) contextCanceled() bool {
+	return i.ctx != nil && i.ctx.Err() != nil
 }

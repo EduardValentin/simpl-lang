@@ -81,6 +81,8 @@ func runRun(args []string) {
 	fs := flag.NewFlagSet("run", flag.ContinueOnError)
 	stdinFile := fs.String("stdin", "", "Path to file used as stdin token source")
 	maxSteps := fs.Int64("max-steps", 0, "Execution step limit")
+	maxValueAllocationBytes := fs.Int64("max-value-allocation-bytes", 0, "Cumulative runtime value allocation byte limit")
+	maxOutputBytes := fs.Int("max-output-bytes", 0, "Execution output byte limit")
 	timeoutMs := fs.Int64("timeout-ms", 0, "Execution timeout in milliseconds")
 	jsonOut := fs.Bool("json", false, "Output result as JSON")
 	fs.SetOutput(os.Stderr)
@@ -102,7 +104,11 @@ func runRun(args []string) {
 		input = string(bytes)
 	}
 
-	opts := simpl.RunOptions{MaxSteps: *maxSteps}
+	opts := simpl.RunOptions{
+		MaxSteps:                *maxSteps,
+		MaxValueAllocationBytes: *maxValueAllocationBytes,
+		MaxOutputBytes:          *maxOutputBytes,
+	}
 	if *timeoutMs > 0 {
 		opts.Timeout = time.Duration(*timeoutMs) * time.Millisecond
 	}
@@ -139,5 +145,5 @@ func printDiagnostics(diags []simpl.Diagnostic) {
 func printUsage() {
 	fmt.Fprintln(os.Stderr, "Usage:")
 	fmt.Fprintln(os.Stderr, "  simpl check <file> [--json]")
-	fmt.Fprintln(os.Stderr, "  simpl run <file> [--stdin <file>] [--max-steps N] [--timeout-ms N] [--json]")
+	fmt.Fprintln(os.Stderr, "  simpl run <file> [--stdin <file>] [--max-steps N] [--max-value-allocation-bytes N] [--max-output-bytes N] [--timeout-ms N] [--json]")
 }

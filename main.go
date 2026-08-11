@@ -1,6 +1,7 @@
 package simpl
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"time"
@@ -12,9 +13,35 @@ const (
 )
 
 // RunOptions configures runtime safety limits.
+//
+// Compile-phase gap: Context, Timeout, and MaxSteps all bound execution
+// only (the interp.run phase, after compileSource has already returned).
+// Lexing, parsing, and type-checking run as a single uninterruptible
+// unit — compileSource does not receive opts at all, so no cancellation,
+// deadline, or step budget is consulted until compilation has finished.
+// A large enough source can therefore hold the CPU for as long as
+// compilation takes regardless of Context or Timeout. Hosts that accept
+// untrusted or attacker-influenced source MUST impose their own hard cap
+// on source length before calling Run/Validate/RunFile; do not rely on
+// Context or Timeout to bound compilation.
 type RunOptions struct {
+	// Context, when non-nil, cancels execution (not compilation — see the
+	// compile-phase gap noted on RunOptions above). Cancellation returns
+	// stdout already emitted, suppresses later callbacks and limit
+	// diagnostics, and remains observable through Context.Err().
+	Context  context.Context
 	MaxSteps int64
-	Timeout  time.Duration
+	// MaxValueAllocationBytes limits cumulative semantic value allocations, not the whole Go heap.
+	// It excludes source loading and compilation, stdin tokenization, source-shaped index traversal
+	// slices, scope maps and stacks, diagnostics, allocator overhead, and trusted host callbacks.
+	// Index traversal storage is bounded by parsed source shape; Course hosts must bound source and
+	// host input independently. Zero is unlimited; negative values are invalid.
+	MaxValueAllocationBytes int64
+	MaxOutputBytes          int
+	// Timeout bounds execution wall-clock time only (not compilation —
+	// see the compile-phase gap noted on RunOptions above). Defaults to
+	// 2s when zero or negative.
+	Timeout time.Duration
 
 	// OnStdoutChunk is called whenever write emits text during execution.
 	OnStdoutChunk func(chunk string, stepsUsed int64)
@@ -39,7 +66,20 @@ func Validate(source string) []Diagnostic {
 // Run lexes/parses/type-checks and executes source.
 func Run(source string, stdin string, opts RunOptions) RunResult {
 	opts = normalizeOptions(opts)
+	if opts.Context != nil && opts.Context.Err() != nil {
+		return RunResult{}
+	}
+	if diagnostic := runOptionsDiagnostic(opts); diagnostic != nil {
+		if opts.OnDiagnostic != nil {
+			opts.OnDiagnostic(*diagnostic)
+		}
+		return RunResult{Diagnostics: []Diagnostic{*diagnostic}}
+	}
+
 	prog, diags := compileSource(source)
+	if opts.Context != nil && opts.Context.Err() != nil {
+		return RunResult{}
+	}
 	if len(diags) > 0 {
 		return RunResult{Diagnostics: diags}
 	}
@@ -73,6 +113,30 @@ func normalizeOptions(opts RunOptions) RunOptions {
 		opts.Timeout = defaultTimeout
 	}
 	return opts
+}
+
+func runOptionsDiagnostic(opts RunOptions) *Diagnostic {
+	if opts.MaxValueAllocationBytes < 0 {
+		diagnostic := newDiagnostic(
+			"LIMIT_INVALID_VALUE_ALLOCATION_LIMIT",
+			"limit",
+			"Value allocation byte limit cannot be negative.",
+			Position{Line: 1, Column: 1},
+			"Use zero for unlimited value allocations or a positive byte limit.",
+		)
+		return &diagnostic
+	}
+	if opts.MaxOutputBytes < 0 {
+		diagnostic := newDiagnostic(
+			"LIMIT_INVALID_OUTPUT_LIMIT",
+			"limit",
+			"Output byte limit cannot be negative.",
+			Position{Line: 1, Column: 1},
+			"Use zero for unlimited output or a positive byte limit.",
+		)
+		return &diagnostic
+	}
+	return nil
 }
 
 func compileSource(source string) (*Program, []Diagnostic) {
